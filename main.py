@@ -1,17 +1,17 @@
 import os
+import sys
 import json
 import datetime as dt
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from openai import OpenAI
 import requests
+import elevenlabs_config as el_config
 
-# ==== Config ====
 PUBLIC_DIR = Path("public")
 EPISODES_DIR = PUBLIC_DIR / "episodes"
-SHOWNOTES_DIR = PUBLIC_DIR / "shownotes"
 
-for d in (PUBLIC_DIR, EPISODES_DIR, SHOWNOTES_DIR):
+for d in (PUBLIC_DIR, EPISODES_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
@@ -19,12 +19,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "").strip()
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "").strip()
-MAX_ITEMS = int(os.getenv("MAX_ITEMS", "8"))
 
 PROMPT_FILE = Path("prompt.txt")
-VOICE_SETTINGS_FILE = Path("voice_settings.json")
-
-# ==== Helper functions ====
 
 def boston_now():
     now = dt.datetime.now(ZoneInfo("America/New_York"))
@@ -43,17 +39,6 @@ def get_prompt():
         return PROMPT_FILE.read_text(encoding="utf-8").strip()
     return ""
 
-def load_voice_settings():
-    if VOICE_SETTINGS_FILE.exists():
-        with open(VOICE_SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "stability": 0.5,
-        "similarity_boost": 0.75,
-        "style": 0.4,
-        "use_speaker_boost": True
-    }
-
 def rewrite_with_gpt(prompt_text: str) -> str | None:
     if not OPENAI_API_KEY or not OPENAI_MODEL:
         return None
@@ -68,25 +53,39 @@ def rewrite_with_gpt(prompt_text: str) -> str | None:
         "- End with quick weather + notable events, then disclose this is AI-written & voiced.\n"
     )
     try:
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            input=f"{control}\n\n{prompt_text}",
-            max_output_tokens=1200
-        )
-        return (getattr(resp, "output_text", None) or "").strip()
+        if OPENAI_MODEL.lower().startswith("gpt-5"):
+            resp = client.responses.create(
+                model=OPENAI_MODEL,
+                input=f"{control}\n\n{prompt_text}",
+                max_output_tokens=1200
+            )
+            return (getattr(resp, "output_text", None) or "").strip()
+        else:
+            resp = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": f"{control}\n\n{prompt_text}"}],
+                temperature=0.35,
+                max_tokens=1200
+            )
+            return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[warn] OpenAI error: {e}")
+        print(f"[error] OpenAI error: {repr(e)}", file=sys.stderr)
         return None
 
 def tts_elevenlabs(text: str) -> bytes | None:
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         return None
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    voice_settings = load_voice_settings()
     payload = {
         "text": text,
-        "voice_settings": voice_settings,
-        "model_id": "eleven_multilingual_v2"
+        "voice_settings": {
+            "stability": el_config.STABILITY,
+            "similarity_boost": el_config.SIMILARITY_BOOST,
+            "style": el_config.STYLE,
+            "use_speaker_boost": el_config.USE_SPEAKER_BOOST
+        },
+        "voice_speed": el_config.VOICE_SPEED,
+        "model_id": el_config.MODEL_ID
     }
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
@@ -99,12 +98,23 @@ def tts_elevenlabs(text: str) -> bytes | None:
 
 def write_index():
     url = f"{PUBLIC_BASE_URL}/feed.xml" if PUBLIC_BASE_URL else "feed.xml"
-    html = f"""<html><head><meta charset='utf-8'><title>Boston Briefing – Internal Beta</title></head>
+    html = f"""<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'/>
+<title>Boston Briefing – Internal Beta</title>
+</head>
 <body>
-<h1>Boston Briefing (Internal Beta)</h1>
-<p><a href="{url}">Podcast RSS</a></p>
+<div style="background:yellow;padding:10px;font-weight:bold;">INTERNAL BETA / TEST — Do not share externally.</div>
+<h1>Boston Briefing</h1>
+<p><a href="{url}">Podcast RSS Feed</a></p>
 <p><a href="shownotes/">Show Notes</a></p>
-</body></html>"""
+<audio controls style="width:100%;margin-top:20px;">
+<source src="episodes/latest.mp3" type="audio/mpeg">
+Your browser does not support the audio element.
+</audio>
+</body>
+</html>"""
     (PUBLIC_DIR / "index.html").write_text(html, encoding="utf-8")
 
 def build_feed(episode_url: str, filesize: int):
@@ -132,14 +142,12 @@ def build_feed(episode_url: str, filesize: int):
 </rss>"""
     (PUBLIC_DIR / "feed.xml").write_text(feed, encoding="utf-8")
 
-# ==== Main workflow ====
-
 def main():
     prompt_text = get_prompt()
     script = rewrite_with_gpt(prompt_text)
     if not script or len(script.split()) < 20:
         script = "Ooops, something went wrong. Sorry about that. Why don't you email Matt Karolian so I can fix it."
-    
+
     print("\n--- SCRIPT TO READ ---\n")
     print(script)
     print("\n--- END SCRIPT ---\n")

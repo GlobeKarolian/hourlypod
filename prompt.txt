@@ -82,4 +82,4 @@ You are writing a short news script for an internal beta podcast called "Boston 
 - After the news stories, give a quick Boston-area weather outlook for today and tonight
 - Mention one or two notable Boston events happening today
 - End with this exact line:
-  "That's the Boston Briefing. This script was written by AI and voiced using an AI recreation of Matt Karolian's voice. This is an internal beta — please do not share externally."
+  "That's the Boston Briefing. This script was written by AI and voiced using an AI clone of Matt Karolian's voice. This is an internal beta — please do not share externally."

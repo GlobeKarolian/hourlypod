@@ -10,3 +10,75 @@ sources:
 
   - name: The Boston Globe
     rss: https://www.bostonglobe.com/arc/outboundfeeds/feedly/?outputType=xml
+
+# NewsAPI: BIG Boston net
+newsapi:
+  enabled: true
+  domains: []  # leave empty to allow any publisher; add domains to restrict
+  queries:
+    - Boston
+    - Massachusetts
+    - "Boston City Council"
+    - MBTA
+    - "Massachusetts Bay Transportation Authority"
+    - "Mayor Wu"
+    - "Boston police"
+    - "Massachusetts State Police"
+    - "Boston fire department"
+    - "Logan Airport"
+    - Massport
+    - "Massachusetts State House"
+    - "Beacon Hill"
+    - "Boston Public Schools"
+    - "Boston Marathon"
+    - "Boston Harbor"
+    - "Boston Commons"
+    - "Fenway Park"
+    - "TD Garden"
+    - "Seaport Boston"
+    - "North End Boston"
+    - "South Boston"
+    - "Dorchester Boston"
+    - "Roxbury Boston"
+    - "Mattapan Boston"
+    - "Jamaica Plain"
+    - "Roslindale"
+    - "Brighton Boston"
+    - "Allston"
+    - "Back Bay Boston"
+    - "Charlestown Boston"
+    - "Hyde Park Boston"
+    - "West Roxbury"
+    - "East Boston"
+    - "Cambridge Massachusetts"
+    - "Somerville Massachusetts"
+    - "Brookline Massachusetts"
+    - "Medford Massachusetts"
+    - "Revere Massachusetts"
+    - "Chelsea Massachusetts"
+    - "Everett Massachusetts"
+    - "Quincy Massachusetts"
+    - "Newton Massachusetts"
+    - "Watertown Massachusetts"
+    - "Arlington Massachusetts"
+    - "Belmont Massachusetts"
+    - "Waltham Massachusetts"
+    - "Malden Massachusetts"
+    - "Boston University"
+    - "Northeastern University"
+    - "Harvard University"
+    - MIT
+    - "Tufts University"
+    - "UMass Boston"
+    - "Massachusetts General Hospital"
+    - "Brigham and Women's Hospital"
+    - "Boston Public Library"
+    - "Museum of Fine Arts Boston"
+    - "Isabella Stewart Gardner Museum"
+    - "Boston Symphony Orchestra"
+    - "Boston Pops"
+    - "Red Sox"
+    - "Boston Celtics"
+    - "New England Patriots"
+    - "Boston Bruins"
+  page_size: 50

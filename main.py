@@ -1,30 +1,21 @@
 # main.py
-# Boston Briefing — RSS + GPT + ElevenLabs (with robust GPT-5 support)
-# - Pulls/filters/dedupes items from feeds.yml
-# - Extracts first-sentence notes
-# - Rewrites to a natural script using prompt.txt
-# - Generates MP3 via ElevenLabs
-# - Publishes public/index.html, public/feed.xml, public/shownotes/<date>.html
-# - Falls back to an apology audio if GPT/Eleven fails
-
 import os, sys, json, datetime as dt
-from email.utils import format_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import yaml, requests, feedparser
+import yaml, feedparser, requests, trafilatura
 from bs4 import BeautifulSoup
 from readability import Document
-import trafilatura
 from rapidfuzz import fuzz, process
 
-# ---------------- Env & paths ----------------
-ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY", "").strip()
-ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "").strip()
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
-MAX_ITEMS       = int(os.getenv("MAX_ITEMS", "10"))
+# ---------- Secrets / Config ----------
+ELEVEN_API_KEY   = os.getenv("ELEVEN_API_KEY", "").strip()
+ELEVEN_VOICE_ID  = os.getenv("ELEVEN_VOICE_ID", "").strip()
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL     = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
+PUBLIC_BASE_URL  = os.getenv("PUBLIC_BASE_URL", "").strip()
+NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "").strip()
+MAX_ITEMS        = int(os.getenv("MAX_ITEMS", "10"))
 
 PUBLIC_DIR = Path("public")
 EP_DIR     = PUBLIC_DIR / "episodes"
@@ -32,44 +23,93 @@ SH_NOTES   = PUBLIC_DIR / "shownotes"
 for d in (PUBLIC_DIR, EP_DIR, SH_NOTES):
     d.mkdir(parents=True, exist_ok=True)
 
-# ---------------- Load feeds ----------------
+# ---------- Load config files ----------
 with open("feeds.yml", "r", encoding="utf-8") as f:
     feeds_cfg = yaml.safe_load(f) or {}
-SOURCES      = feeds_cfg.get("sources", [])
-EXCLUDE      = set(str(k).lower() for k in feeds_cfg.get("exclude_keywords", []))
-LIMIT_PER    = int(feeds_cfg.get("daily_limit_per_source", feeds_cfg.get("daily_limit_per_source", 6)))
+SOURCES     = feeds_cfg.get("sources", [])
+EXCLUDE     = set(str(k).lower() for k in feeds_cfg.get("exclude_keywords", []))
+LIMIT_PER   = int(feeds_cfg.get("daily_limit_per_source", feeds_cfg.get("daily_limit_per_source", 6)))
 
-# ---------------- Helpers ----------------
-def log(msg: str):
-    print(f"[diag] {msg}")
+VOICE_SETTINGS_PATH = Path("voice_settings.json")
+DEFAULT_VOICE_SETTINGS = {
+    "stability": 0.58,
+    "similarity_boost": 0.88,
+    "style": 0.35,
+    "use_speaker_boost": True,
+    "voice_speed": 1.03,     # a touch brisker for news; adjust in voice_settings.json
+    "model_id": "eleven_multilingual_v2"
+}
+if VOICE_SETTINGS_PATH.exists():
+    try:
+        DEFAULT_VOICE_SETTINGS.update(json.loads(VOICE_SETTINGS_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        pass
 
+# ---------- Helpers ----------
 def is_newsworthy(title: str) -> bool:
     t = (title or "").lower()
     return t and not any(k in t for k in EXCLUDE)
 
-def fetch_items():
-    items = []
-    log(f"fetching from {len(SOURCES)} source(s), per_source cap={LIMIT_PER}")
+def fetch_items_from_rss():
+    out = []
     for src in SOURCES:
         name, rss = src.get("name","Unknown"), src.get("rss","")
         if not rss:
             continue
         try:
             fp = feedparser.parse(rss)
-            raw = len(fp.entries or [])
-            kept = 0
+            count = 0
             for e in fp.entries:
-                if kept >= LIMIT_PER: break
+                if count >= LIMIT_PER: break
                 title = (e.get("title") or "").strip()
                 link  = (e.get("link") or "").strip()
                 if not title or not link: continue
                 if not is_newsworthy(title): continue
-                items.append({"source": name, "title": title, "link": link})
-                kept += 1
-            log(f"{name}: {raw} raw entries")
-            log(f"{name}: kept {kept}")
+                out.append({"source": name, "title": title, "link": link})
+                count += 1
         except Exception as ex:
             print(f"[warn] feed error {name}: {ex}", file=sys.stderr)
+    return out
+
+def fetch_from_newsapi(cfg) -> list[dict]:
+    """Optional: query NewsAPI to broaden coverage (Globe, Boston.com, B-Side, AP/Reuters Boston hits, etc.)."""
+    if not NEWSAPI_KEY:
+        return []
+    news_cfg = (cfg or {}).get("newsapi", {})
+    # If user sets newsapi.enabled: false, skip; else default to enabled when key exists
+    if news_cfg.get("enabled") is False:
+        return []
+
+    domains  = news_cfg.get("domains", [])  # restrict to certain domains if you want
+    queries  = news_cfg.get("queries", ["Boston", "Massachusetts", "Boston City Council", "MBTA", "Mayor Wu"])
+    page_sz  = int(news_cfg.get("page_size", 50))
+
+    base = "https://newsapi.org/v2/everything"
+    headers = {"X-Api-Key": NEWSAPI_KEY}
+    q = " OR ".join([q for q in queries if q.strip()]) or "Boston"
+
+    params = {
+        "q": q,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": page_sz,
+    }
+    if domains:
+        params["domains"] = ",".join(domains)
+
+    items = []
+    try:
+        r = requests.get(base, headers=headers, params=params, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+        for a in (data.get("articles") or []):
+            title = (a.get("title") or "").strip()
+            url   = (a.get("url") or "").strip()
+            src   = (a.get("source", {}).get("name") or "NewsAPI").strip()
+            if title and url and is_newsworthy(title):
+                items.append({"source": src, "title": title, "link": url})
+    except Exception as ex:
+        print(f"[warn] newsapi error: {ex}", file=sys.stderr)
     return items
 
 def dedupe(items, threshold=90):
@@ -84,7 +124,7 @@ def dedupe(items, threshold=90):
     return kept
 
 def extract_text(url: str) -> str:
-    # Try trafilatura first
+    # 1) trafilatura
     try:
         downloaded = trafilatura.fetch_url(url, timeout=20)
         if downloaded:
@@ -93,7 +133,7 @@ def extract_text(url: str) -> str:
                 return extracted
     except Exception:
         pass
-    # Fallback: readability
+    # 2) readability
     try:
         html = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"}).text
         doc = Document(html)
@@ -107,32 +147,23 @@ def extract_text(url: str) -> str:
 
 def first_sentence(text: str) -> str:
     text = " ".join(text.split())
-    for sep in [". ", " — ", " – ", ": "]:
+    for sep in [". ", " — ", " – ", " • "]:
         if sep in text:
             cand = text.split(sep)[0]
             if len(cand.split()) >= 8:
-                return cand.strip(".•–—: ")
+                return cand.strip(".•–— ")
     return text[:240].rsplit(" ",1)[0]
 
 def build_notes(items):
-    notes = []
-    used = 0
-    log(f"total fetched (pre-dedupe): {len(items)}")
-    items = dedupe(items)
-    log(f"total after dedupe: {len(items)}")
-    log(f"extracting up to MAX_ITEMS={MAX_ITEMS}")
+    notes, used = [], 0
     for it in items:
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
-        if not txt:
-            continue
+        if not txt: continue
         sent = first_sentence(txt)
-        if len(sent.split()) < 6:
-            continue
-        notes.append(f"{it['source']}: {sent} (link: {it['link']})")
-        log(f"[ok] {it['source']} — extracted")
+        if len(sent.split()) < 6: continue
+        notes.append(f"{it['source']}: {sent}  (link: {it['link']})")
         used += 1
-    log(f"notes built: {len(notes)}")
     return notes
 
 def boston_now():
@@ -147,7 +178,7 @@ def boston_now():
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
-# ---------------- OpenAI ----------------
+# ---------- OpenAI ----------
 try:
     from openai import OpenAI
     _client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -155,53 +186,39 @@ except Exception as e:
     print(f"[warn] openai import failed: {e}", file=sys.stderr)
     _client = None
 
-def _use_responses_api(model: str) -> bool:
-    m = (model or "").lower()
-    return m.startswith("gpt-5") or "responses" in m
-
 def _responses_api(prompt_text: str, notes: list[str], model: str) -> str:
+    # Avoid params some models don’t accept (e.g., temperature). Keep it minimal.
     now, tod, pretty_date = boston_now()
     control = (
         "HARD CONSTRAINTS (do not violate):\n"
-        f"- Time-of-day greeting MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
-        "- Lead with the most important news; do NOT lead with sports unless it is indisputably the top story.\n"
-        "- Absolutely no editorializing, sympathy, or sentiment (no 'thoughts and prayers', 'we hope', etc.).\n"
-        "- Integrate source names naturally in the flow (e.g., 'The Globe reports…', 'Boston.com says…', 'B-Side notes…').\n"
-        "- 5–8 items; smooth, human transitions; quick weather + notable events; end with the internal beta disclosure.\n"
+        f"- Opening must be: 'Good {tod}, it’s {pretty_date}.'\n"
+        "- Lead with the most important news; do NOT lead with sports unless it’s clearly the top story.\n"
+        "- No editorializing, sympathy, or sentiment. Just factual, concise, and human-sounding.\n"
+        "- Integrate source names naturally (e.g., 'The Globe reports…', 'Boston.com says…', 'B-Side notes…').\n"
+        "- 5–8 items; smooth transitions; then quick weather + 1–2 notable events; end with the beta disclosure.\n"
     )
-    user_block = "STORIES (verbatim notes, may be messy):\n" + "\n\n".join(notes)
-    full_input = f"{control}\n\nUSER PROMPT:\n{prompt_text.strip()}\n\n{user_block}"
+    user_block = "STORIES (verbatim notes):\n" + "\n\n".join(notes)
+    full_input = f"{control}\n\nSTYLE PROMPT:\n{prompt_text.strip()}\n\n{user_block}"
 
-    # Try with temperature first; if model rejects any param, retry minimal
-    try:
-        resp = _client.responses.create(
-            model=model,
-            input=full_input,
-            temperature=0.35,
-            max_completion_tokens=1200,   # <- Responses API expects this
-        )
-        return (getattr(resp, "output_text", None) or "").strip()
-    except Exception as e:
-        print(f"[warn] Responses API (with temperature) failed: {e}", file=sys.stderr)
-        # Retry without temperature in case model disallows it
-        resp = _client.responses.create(
-            model=model,
-            input=full_input,
-            max_completion_tokens=1200,
-        )
-        return (getattr(resp, "output_text", None) or "").strip()
+    # Some deployments expect 'input' only + max_output_tokens
+    resp = _client.responses.create(
+        model=model,
+        input=full_input,
+        max_output_tokens=1200,   # keep within cost; raise if you like
+    )
+    return (getattr(resp, "output_text", None) or "").strip()
 
 def _chat_api(prompt_text: str, notes: list[str], model: str) -> str:
     now, tod, pretty_date = boston_now()
     control = (
         "HARD CONSTRAINTS (do not violate):\n"
-        f"- Time-of-day greeting MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
-        "- Lead with the most important news; do NOT lead with sports unless it is indisputably the top story.\n"
-        "- Absolutely no editorializing, sympathy, or sentiment (no 'thoughts and prayers', 'we hope', etc.).\n"
-        "- Integrate source names naturally in the flow (e.g., 'The Globe reports…', 'Boston.com says…', 'B-Side notes…').\n"
-        "- 5–8 items; smooth, human transitions; quick weather + notable events; end with the internal beta disclosure.\n"
+        f"- Opening must be: 'Good {tod}, it’s {pretty_date}.'\n"
+        "- Lead with the most important news; do NOT lead with sports unless it’s clearly the top story.\n"
+        "- No editorializing, sympathy, or sentiment. Just factual, concise, and human-sounding.\n"
+        "- Integrate source names naturally (e.g., 'The Globe reports…', 'Boston.com says…', 'B-Side notes…').\n"
+        "- 5–8 items; smooth transitions; then quick weather + 1–2 notable events; end with the beta disclosure.\n"
     )
-    user_block = "STORIES (verbatim notes, may be messy):\n" + "\n\n".join(notes)
+    user_block = "STORIES (verbatim notes):\n" + "\n\n".join(notes)
     resp = _client.chat.completions.create(
         model=model,
         messages=[
@@ -209,7 +226,7 @@ def _chat_api(prompt_text: str, notes: list[str], model: str) -> str:
             {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
         ],
         temperature=0.35,
-        max_tokens=1200,  # Chat Completions expects max_tokens
+        max_tokens=1200,
     )
     return resp.choices[0].message.content.strip()
 
@@ -217,56 +234,39 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     if not _client or not OPENAI_MODEL:
         return None
     try:
-        if _use_responses_api(OPENAI_MODEL):
-            out = _responses_api(prompt_text, notes, OPENAI_MODEL)
+        # Prefer Responses API for GPT-5* names; fall back to Chat
+        if OPENAI_MODEL.lower().startswith("gpt-5"):
+            try:
+                return _responses_api(prompt_text, notes, OPENAI_MODEL)
+            except Exception as e:
+                print(f"[warn] Responses API failed: {e}", file=sys.stderr)
+                return _chat_api(prompt_text, notes, "gpt-4o")
         else:
-            out = _chat_api(prompt_text, notes, OPENAI_MODEL)
-        return (out or "").strip()
+            return _chat_api(prompt_text, notes, OPENAI_MODEL)
     except Exception as e:
-        print(f"[warn] OpenAI generation failed: {e}", file=sys.stderr)
-        # Fallback to gpt-4o via Chat Completions, which is very permissive
+        print(f"[warn] OpenAI error: {e}", file=sys.stderr)
         try:
-            out = _chat_api(prompt_text, notes, "gpt-4o")
-            return (out or "").strip()
+            return _chat_api(prompt_text, notes, "gpt-4o")
         except Exception as e2:
             print(f"[warn] OpenAI fallback failed: {e2}", file=sys.stderr)
             return None
 
-# ---------------- ElevenLabs ----------------
-def load_voice_settings() -> dict:
-    # Optional JSON file for fine-tuning; otherwise sensible defaults
-    vs = {
-        "stability": 0.55,
-        "similarity_boost": 0.85,
-        "style": 0.40,
-        "use_speaker_boost": True,
-        "voice_speed": 1.05,
-        "model_id": "eleven_multilingual_v2",
-    }
-    try:
-        p = Path("voice_settings.json")
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                vs.update(data)
-    except Exception as e:
-        print(f"[warn] voice_settings.json load failed: {e}", file=sys.stderr)
-    return vs
-
+# ---------- ElevenLabs ----------
 def tts_elevenlabs(text: str) -> bytes | None:
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         return None
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    vs = load_voice_settings()
+
+    vs = DEFAULT_VOICE_SETTINGS.copy()
     payload = {
         "text": text,
         "voice_settings": {
-            "stability": vs.get("stability", 0.55),
-            "similarity_boost": vs.get("similarity_boost", 0.85),
-            "style": vs.get("style", 0.40),
-            "use_speaker_boost": vs.get("use_speaker_boost", True),
+            "stability": vs.get("stability", 0.58),
+            "similarity_boost": vs.get("similarity_boost", 0.88),
+            "style": vs.get("style", 0.35),
+            "use_speaker_boost": bool(vs.get("use_speaker_boost", True))
         },
-        "voice_speed": vs.get("voice_speed", 1.05),
+        "voice_speed": vs.get("voice_speed", 1.03),
         "model_id": vs.get("model_id", "eleven_multilingual_v2"),
     }
     headers = {
@@ -278,7 +278,7 @@ def tts_elevenlabs(text: str) -> bytes | None:
     r.raise_for_status()
     return r.content
 
-# ---------------- Output ----------------
+# ---------- Site output ----------
 def write_shownotes(date_str, items):
     html = ["<html><head><meta charset='utf-8'><title>Boston Briefing – Sources</title></head><body>"]
     html.append(f"<h2>Boston Briefing – {date_str}</h2>")
@@ -293,12 +293,11 @@ def write_shownotes(date_str, items):
 
 def write_index():
     url = f"{PUBLIC_BASE_URL}/feed.xml" if PUBLIC_BASE_URL else "feed.xml"
-    notes_url = f"{(PUBLIC_BASE_URL or '.').rstrip('/')}/shownotes/"
     html = f"""<html><head><meta charset='utf-8'><title>Boston Briefing (Internal Beta)</title></head>
 <body>
   <h1>Boston Briefing (Internal Beta)</h1>
   <p><a href="{url}">Podcast RSS</a></p>
-  <p><a href="{notes_url}">Show Notes</a></p>
+  <p><a href="{(PUBLIC_BASE_URL or '.').rstrip('/')}/shownotes/">Show Notes</a></p>
 </body></html>"""
     (PUBLIC_DIR / "index.html").write_text(html, encoding="utf-8")
 
@@ -306,9 +305,8 @@ def build_feed(episode_url: str, filesize: int):
     title = "Boston Briefing"
     desc  = "A short, factual Boston news briefing."
     link  = PUBLIC_BASE_URL or ""
-    now   = dt.datetime.now().astimezone()
-    last_build = format_datetime(now)
-    item_title = now.strftime("Boston Briefing – %Y-%m-%d")
+    last_build = dt.datetime.now().astimezone().strftime("%a, %d %b %Y %H:%M:%S %z")
+    item_title = dt.datetime.now().strftime("Boston Briefing – %Y-%m-%d")
     guid = episode_url or item_title
     enclosure = f'<enclosure url="{episode_url}" length="{filesize}" type="audio/mpeg"/>' if episode_url else ""
     feed = [
@@ -336,58 +334,45 @@ def build_feed(episode_url: str, filesize: int):
     ]
     (PUBLIC_DIR / "feed.xml").write_text("\n".join(feed), encoding="utf-8")
 
-# ---------------- Main ----------------
+# ---------- Main ----------
 def main():
-    print("== Run python main.py")
-    print("python main.py")
-    print("shell: /usr/bin/bash -e {0}")
-    print("env:")
-    print(f"  PUBLIC_BASE_URL: {'***' if PUBLIC_BASE_URL else ''}")
-    print(f"  OPENAI_API_KEY: {'***' if OPENAI_API_KEY else ''}")
-    print(f"  OPENAI_MODEL: {'***' if OPENAI_MODEL else ''}")
-    print(f"  ELEVEN_API_KEY: {'***' if ELEVEN_API_KEY else ''}")
-    print(f"  ELEVEN_VOICE_ID: {'***' if ELEVEN_VOICE_ID else ''}")
-    print(f"  MAX_ITEMS: {MAX_ITEMS}")
+    # 1) Collect candidates
+    items_rss = fetch_items_from_rss()
+    items_api = fetch_from_newsapi(feeds_cfg)  # optional; on if NEWSAPI_KEY and not disabled
+    items = dedupe(items_rss + items_api)
 
-    # 1) Fetch + extract notes
-    items = fetch_items()
+    # 2) Extract short notes
     notes = build_notes(items)
 
-    # 2) Load newsroom prompt (editable)
-    prompt_text = ""
-    ptxt = Path("prompt.txt")
-    if ptxt.exists():
-        prompt_text = ptxt.read_text(encoding="utf-8")
+    # 3) Load newsroom style prompt
+    prompt_text = Path("prompt.txt").read_text(encoding="utf-8") if Path("prompt.txt").exists() else ""
 
-    # 3) Try GPT rewrite
+    # 4) GPT rewrite
     gpt_script = None
-    if prompt_text and notes and OPENAI_API_KEY:
+    if prompt_text and notes:
         gpt_script = rewrite_with_openai(prompt_text, notes)
-        if not gpt_script:
-            print("[warn] GPT rewrite returned empty")
 
-    # 4) Fallback script if GPT failed/empty
+    # 5) Fallback if GPT fails/empty
     if gpt_script and len(gpt_script.split()) > 20:
         final_script = gpt_script
-        log("OpenAI client ready; model=****")
     else:
         final_script = (
             "Ooops, something went wrong. Sorry about that. "
             "Why don't you email Matt Karolian so I can fix it."
         )
 
-    # 5) Log the script
+    # Log script for inspection
     print("\n--- SCRIPT TO READ ---\n")
     print(final_script.strip())
     print("\n--- END SCRIPT ---\n")
 
-    # 6) Write site scaffolding
+    # 6) Site artifacts
     today = dt.datetime.now(ZoneInfo("America/New_York"))
     date_str = today.strftime("%Y-%m-%d")
     write_shownotes(date_str, items)
     write_index()
 
-    # 7) TTS + save MP3
+    # 7) TTS + feed
     mp3_bytes = None
     try:
         mp3_bytes = tts_elevenlabs(final_script)
@@ -403,13 +388,8 @@ def main():
         filesize = len(mp3_bytes)
         if PUBLIC_BASE_URL:
             ep_url = f"{PUBLIC_BASE_URL}/episodes/{ep_name}"
-        log(f"saved MP3: public/episodes/{ep_name} ({filesize} bytes)")
-    else:
-        log("no MP3 generated")
 
-    # 8) RSS feed
     build_feed(ep_url, filesize)
-    log("done.")
 
 if __name__ == "__main__":
     main()

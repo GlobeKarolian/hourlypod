@@ -46,7 +46,6 @@ def boston_now():
         tod = "afternoon"
     else:
         tod = "evening"
-    # “Monday, August 11, 2025” without %-d for Windows
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
@@ -126,7 +125,6 @@ def build_notes(items):
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
         if not txt:
-            # fall back to feed summary/title so we never end up empty
             txt = it.get("summary") or it["title"]
         sent = first_sentence(txt)
         if len(sent.split()) < 6:
@@ -161,7 +159,6 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
     try:
         if OPENAI_MODEL.lower().startswith("gpt-5"):
-            # Responses API—use max_output_tokens; omit temperature
             resp = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
@@ -170,14 +167,13 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             txt = getattr(resp, "output_text", None)
             if txt and len(txt.split()) > 25:
                 return txt.strip()
-            # retry without cap if model ignores max_output_tokens
+            # retry w/o cap if needed
             resp2 = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
             )
             return (getattr(resp2, "output_text", "") or "").strip()
         else:
-            # Chat Completions (gpt-4o)
             resp = _client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
@@ -190,7 +186,6 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[warn] OpenAI generation failed: {e}")
-        # last-chance fallback to gpt-4o
         try:
             resp = _client.chat.completions.create(
                 model="gpt-4o",
@@ -208,19 +203,16 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
 
 # -------------------- TTS SANITIZER --------------------
 def sanitize_for_tts(s: str) -> str:
-    # Normalize punctuation & expand acronyms to reduce prosody “drag”
     rep = (
         ("—", ", "), ("–", ", "), ("…", ". "),
         (" / ", " or "),
     )
     for a,b in rep:
         s = s.replace(a,b)
-    # Expand a couple of Boston acronyms that get elongated
     s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
-    # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- ELEVENLABS (NON-STREAMING, LATENCY OFF) --------------------
+# -------------------- ELEVENLABS (CLEAN NON-STREAMING) --------------------
 def _load_voice_settings():
     vs_json = ROOT / "voice_settings.json"
     if vs_json.exists():
@@ -242,22 +234,24 @@ def tts_elevenlabs(text: str) -> bytes | None:
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    settings = _load_voice_settings()
+    s = _load_voice_settings()
+
+    # Clean non-streaming endpoint; no streaming params; explicit format is fine
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    # Force non-streaming + explicitly disable streaming latency + set output format
-    url = f"{base}?optimize_streaming_latency=0&output_format=mp3_44100_128"
+    url  = f"{base}?output_format=mp3_44100_128"
     print(f"[diag] ElevenLabs URL: {url}")
 
     payload = {
         "text": text,
-        "model_id": settings.get("model_id", "eleven_multilingual_v2"),
+        "model_id": s.get("model_id", "eleven_multilingual_v2"),
         "voice_settings": {
-            "stability": settings.get("stability", 0.72),
-            "similarity_boost": settings.get("similarity_boost", 0.90),
-            "style": settings.get("style", 0.25),
-            "use_speaker_boost": bool(settings.get("use_speaker_boost", True))
+            "stability": s.get("stability", 0.72),
+            "similarity_boost": s.get("similarity_boost", 0.90),
+            "style": s.get("style", 0.25),
+            "use_speaker_boost": bool(s.get("use_speaker_boost", True)),
         },
-        "voice_speed": settings.get("voice_speed", 1.04)
+        # IMPORTANT: voice_speed is top-level per API schema
+        "voice_speed": s.get("voice_speed", 1.04),
     }
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
@@ -265,10 +259,11 @@ def tts_elevenlabs(text: str) -> bytes | None:
         "content-type": "application/json"
     }
 
-    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=180)
+    r = requests.post(url, headers=headers, json=payload, timeout=180)
     if r.status_code >= 400:
-        print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+        print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
         return None
+    print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
     return r.content
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
@@ -285,7 +280,6 @@ def write_shownotes(date_str, items):
     (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
 def write_index_if_missing():
-    """Only scaffold if you haven't uploaded your own UI."""
     idx = PUBLIC_DIR / "index.html"
     if idx.exists():
         return
@@ -337,7 +331,7 @@ def build_feed(episode_url: str, filesize: int):
 # -------------------- MAIN --------------------
 def main():
     print("[diag] starting run…")
-    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_API_KEY=*** OPENAI_MODEL={OPENAI_MODEL} ELEVEN_API_KEY=*** ELEVEN_VOICE_ID=*** MAX_ITEMS={MAX_ITEMS}")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
 
     raw = fetch_items()
     print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
@@ -347,37 +341,31 @@ def main():
     notes = build_notes(deduped)
     print(f"[diag] notes built: {len(notes)}")
 
-    # Load newsroom prompt (editable file)
     prompt_text = ""
     p = ROOT / "prompt.txt"
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
 
-    # Generate script
     script = None
     if prompt_text.strip() and notes:
         script = rewrite_with_openai(prompt_text, notes)
 
-    # Fallback text if GPT failed/empty
     if not script or len(script.split()) < 25:
         script = ("Ooops, something went wrong. Sorry about that. "
                   "Why don't you email Matt Karolian so I can fix it.")
 
-    # Sanitize for smoother TTS pacing
     script = sanitize_for_tts(script)
 
     print("\n--- SCRIPT TO READ ---\n")
     print(script.strip())
     print("\n--- END SCRIPT ---\n")
 
-    # Output artifacts
     today = dt.datetime.now(ZoneInfo("America/New_York"))
     date_str = today.strftime("%Y-%m-%d")
 
     write_shownotes(date_str, deduped)
     write_index_if_missing()
 
-    # TTS
     mp3_bytes = None
     try:
         mp3_bytes = tts_elevenlabs(script)

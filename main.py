@@ -46,6 +46,7 @@ def boston_now():
         tod = "afternoon"
     else:
         tod = "evening"
+    # “Monday, August 11, 2025” without %-d for Windows
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
@@ -125,6 +126,7 @@ def build_notes(items):
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
         if not txt:
+            # fall back to feed summary/title so we never end up empty
             txt = it.get("summary") or it["title"]
         sent = first_sentence(txt)
         if len(sent.split()) < 6:
@@ -203,92 +205,64 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
 
 # -------------------- TTS SANITIZER --------------------
 def sanitize_for_tts(s: str) -> str:
+    # Normalize punctuation & expand acronyms to reduce prosody “drag”
     rep = (
         ("—", ", "), ("–", ", "), ("…", ". "),
         (" / ", " or "),
     )
     for a,b in rep:
         s = s.replace(a,b)
+    # Expand a couple of Boston acronyms that get elongated
     s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- ELEVENLABS (CLEAN NON-STREAMING, CLAUDE VARIANT) --------------------
-def _load_voice_settings():
-    vs_json = ROOT / "voice_settings.json"
-    if vs_json.exists():
-        try:
-            return json.loads(vs_json.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {
-        "stability": 0.72,
-        "similarity_boost": 0.90,
-        "style": 0.25,
-        "use_speaker_boost": True,
-        "voice_speed": 1.04,
-        "model_id": "eleven_multilingual_v2"
-    }
-
-def _tts_payload_voice_speed_inside(s, text):
-    # Claude's requested placement: voice_speed inside voice_settings
-    return {
-        "text": text,
-        "model_id": s.get("model_id", "eleven_multilingual_v2"),
-        "voice_settings": {
-            "stability": s.get("stability", 0.72),
-            "similarity_boost": s.get("similarity_boost", 0.90),
-            "style": s.get("style", 0.25),
-            "use_speaker_boost": bool(s.get("use_speaker_boost", True)),
-            "voice_speed": s.get("voice_speed", 1.04),
-        }
-    }
-
-def _tts_payload_voice_speed_top_level(s, text):
-    # Fallback if the API rejects the above schema
-    return {
-        "text": text,
-        "model_id": s.get("model_id", "eleven_multilingual_v2"),
-        "voice_settings": {
-            "stability": s.get("stability", 0.72),
-            "similarity_boost": s.get("similarity_boost", 0.90),
-            "style": s.get("style", 0.25),
-            "use_speaker_boost": bool(s.get("use_speaker_boost", True)),
-        },
-        "voice_speed": s.get("voice_speed", 1.04),
-    }
-
+# -------------------- ELEVENLABS (SINGLE CLEAN REQUEST) --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
+    """
+    Single clean TTS request to ElevenLabs (non-streaming).
+    Uses top-level voice_speed and conservative 'news anchor' settings.
+    """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    s = _load_voice_settings()
-
+    # Non-streaming endpoint; explicit output format; no streaming params
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
     url  = f"{base}?output_format=mp3_44100_128"
+
+    payload = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",  # steady, high-quality long-form
+        "voice_settings": {
+            "stability": 0.80,        # consistent pacing
+            "similarity_boost": 0.90, # keep timbre close
+            "style": 0.15,            # low drama for news
+            "use_speaker_boost": True
+        },
+        # IMPORTANT: voice_speed at top-level (not inside voice_settings)
+        "voice_speed": 1.00
+    }
+
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json"
     }
 
-    # 1) Try Claude's schema first (voice_speed inside voice_settings)
-    payload = _tts_payload_voice_speed_inside(s, text)
-    r = requests.post(url, headers=headers, json=payload, timeout=180)
-    if r.status_code < 400:
-        print(f"[diag] ElevenLabs success (inside): {len(r.content)} bytes")
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=180)
+        if r.status_code >= 400:
+            print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
+            return None
+        print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
         return r.content
-    print(f"[warn] ElevenLabs (inside) {r.status_code}: {r.text[:300]}", file=sys.stderr)
-
-    # 2) Fallback to top-level voice_speed if the first attempt failed
-    payload2 = _tts_payload_voice_speed_top_level(s, text)
-    r2 = requests.post(url, headers=headers, json=payload2, timeout=180)
-    if r2.status_code < 400:
-        print(f"[diag] ElevenLabs success (top-level fallback): {len(r2.content)} bytes")
-        return r2.content
-
-    print(f"[warn] ElevenLabs failed both schemas; last {r2.status_code}: {r2.text[:300]}", file=sys.stderr)
-    return None
+    except requests.exceptions.Timeout:
+        print("[warn] ElevenLabs request timed out", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
+        return None
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):
@@ -304,6 +278,7 @@ def write_shownotes(date_str, items):
     (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
 def write_index_if_missing():
+    """Only scaffold if you haven't uploaded your own UI."""
     idx = PUBLIC_DIR / "index.html"
     if idx.exists():
         return
@@ -365,31 +340,37 @@ def main():
     notes = build_notes(deduped)
     print(f"[diag] notes built: {len(notes)}")
 
+    # Load newsroom prompt (editable file)
     prompt_text = ""
     p = ROOT / "prompt.txt"
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
 
+    # Generate script
     script = None
     if prompt_text.strip() and notes:
         script = rewrite_with_openai(prompt_text, notes)
 
+    # Fallback text if GPT failed/empty
     if not script or len(script.split()) < 25:
         script = ("Ooops, something went wrong. Sorry about that. "
                   "Why don't you email Matt Karolian so I can fix it.")
 
+    # Sanitize for smoother TTS pacing
     script = sanitize_for_tts(script)
 
     print("\n--- SCRIPT TO READ ---\n")
     print(script.strip())
     print("\n--- END SCRIPT ---\n")
 
+    # Output artifacts
     today = dt.datetime.now(ZoneInfo("America/New_York"))
     date_str = today.strftime("%Y-%m-%d")
 
     write_shownotes(date_str, deduped)
     write_index_if_missing()
 
+    # TTS + feed
     mp3_bytes = None
     try:
         mp3_bytes = tts_elevenlabs(script)

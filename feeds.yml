@@ -11,5 +11,5 @@ sources:
   - name: The Boston Globe
     rss: https://www.bostonglobe.com/arc/outboundfeeds/feedly/?outputType=xml
 
-  - name: The Boston Globe Metro
+  - name: The Boston Globe 
     rss: https://www.bostonglobe.com/metro/?outputType=rss

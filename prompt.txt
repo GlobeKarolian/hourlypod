@@ -41,4 +41,7 @@ Only for today, 1 sentence each, prioritize public/free events.
 
 CLOSING:
 Wrap with weather and events, then end with:
-“That’s the Boston Briefing. This script was written by AI and voiced using an AI clone of Matt Karolian’s voice. This is an internal beta — please do not share externally.”
+“That’s the Boston Briefing. This script was written by AI and voiced using an AI clone of Matt Karolian’s voice. This is an internal beta — please do not share externally. Code .1”
+
+Always go back and re-read what you've written to ensure it all makes sense, flows smoothly, etc. 
+

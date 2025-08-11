@@ -46,6 +46,7 @@ def boston_now():
         tod = "afternoon"
     else:
         tod = "evening"
+    # “Monday, August 11, 2025” without %-d for Windows
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
@@ -125,6 +126,7 @@ def build_notes(items):
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
         if not txt:
+            # fall back to feed summary/title so we never end up empty
             txt = it.get("summary") or it["title"]
         sent = first_sentence(txt)
         if len(sent.split()) < 6:
@@ -164,7 +166,8 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
                 max_output_tokens=1200,
             )
-            return (getattr(resp, "output_text", "") or "").strip()
+            txt = getattr(resp, "output_text", None)
+            return (txt or "").strip()
         else:
             resp = _client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -180,18 +183,27 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         print(f"[warn] OpenAI generation failed: {e}")
         return None
 
-# -------------------- ELEVENLABS (ONE SIMPLE CALL) --------------------
-def tts_elevenlabs(text: str) -> bytes | None:
+# -------------------- TTS SANITIZER --------------------
+def sanitize_for_tts(s: str) -> str:
+    # Normalize punctuation & expand acronyms to reduce prosody “drag”
+    rep = (("—", ", "), ("–", ", "), ("…", ". "), (" / ", " or "))
+    for a,b in rep:
+        s = s.replace(a,b)
+    s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    return " ".join(s.split())
+
+# -------------------- ELEVENLABS (STREAMING TTS) --------------------
+def tts_elevenlabs_streaming(text: str, output_path: Path) -> int | None:
     """
-    Minimal non-streaming ElevenLabs TTS call.
-    No preprocessing, no chunking, no retries.
+    Stream TTS audio from ElevenLabs and save directly to output_path.
+    Single clean request (no retries), non-conversational endpoint.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url  = f"{base}?output_format=mp3_44100_128"
+    url  = f"{base}/stream?output_format=mp3_44100_128"  # streaming variant
 
     payload = {
         "text": text,
@@ -202,7 +214,7 @@ def tts_elevenlabs(text: str) -> bytes | None:
             "style": 0.15,
             "use_speaker_boost": True
         },
-        # Per your direction: keep voice_speed at TOP LEVEL
+        # Per your request: voice_speed at TOP LEVEL
         "voice_speed": 1.00
     }
 
@@ -213,11 +225,18 @@ def tts_elevenlabs(text: str) -> bytes | None:
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=180)
-        if r.status_code >= 400:
-            print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
-            return None
-        return r.content
+        with requests.post(url, headers=headers, json=payload, stream=True, timeout=180) as r:
+            if r.status_code >= 400:
+                print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
+                return None
+            # Write chunks as they arrive
+            with open(output_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=4096):
+                    if chunk:
+                        f.write(chunk)
+        filesize = output_path.stat().st_size
+        print(f"[diag] ElevenLabs streaming success: saved {filesize} bytes to {output_path}")
+        return filesize
     except requests.exceptions.Timeout:
         print("[warn] ElevenLabs request timed out", file=sys.stderr)
         return None
@@ -239,6 +258,7 @@ def write_shownotes(date_str, items):
     (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
 def write_index_if_missing():
+    """Only scaffold if you haven't uploaded your own UI."""
     idx = PUBLIC_DIR / "index.html"
     if idx.exists():
         return
@@ -293,8 +313,12 @@ def main():
     print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
 
     raw = fetch_items()
+    print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
     deduped = dedupe(raw)
+    print(f"[diag] total after dedupe: {len(deduped)}")
+
     notes = build_notes(deduped)
+    print(f"[diag] notes built: {len(notes)}")
 
     # Load newsroom prompt (editable file)
     prompt_text = ""
@@ -302,14 +326,18 @@ def main():
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
 
-    # Generate script (no sanitizing/processing)
+    # Generate script
     script = None
     if prompt_text.strip() and notes:
         script = rewrite_with_openai(prompt_text, notes)
 
+    # Fallback text if GPT failed/empty
     if not script or len(script.split()) < 25:
         script = ("Ooops, something went wrong. Sorry about that. "
                   "Why don't you email Matt Karolian so I can fix it.")
+
+    # Sanitize for smoother TTS pacing
+    script = sanitize_for_tts(script)
 
     print("\n--- SCRIPT TO READ ---\n")
     print(script.strip())
@@ -322,23 +350,20 @@ def main():
     write_shownotes(date_str, deduped)
     write_index_if_missing()
 
-    # TTS (single shot) + feed
+    # TTS (STREAMING) + feed
     ep_name = f"boston-briefing-{date_str}.mp3"
     ep_path = EP_DIR / ep_name
 
-    mp3_bytes = tts_elevenlabs(script)
+    filesize = tts_elevenlabs_streaming(script, ep_path)
 
     ep_url = ""
-    filesize = 0
-    if mp3_bytes:
-        ep_path.write_bytes(mp3_bytes)
-        filesize = len(mp3_bytes)
+    if filesize:
         ep_url = f"{PUBLIC_BASE_URL}/episodes/{ep_name}" if PUBLIC_BASE_URL else f"episodes/{ep_name}"
         print(f"[diag] saved MP3: {ep_path} ({filesize} bytes)")
     else:
         print("[diag] MP3 not created; continuing with feed + site")
 
-    build_feed(ep_url, filesize)
+    build_feed(ep_url, filesize or 0)
     print("[diag] done.")
 
 if __name__ == "__main__":

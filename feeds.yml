@@ -2,9 +2,6 @@ daily_limit_per_source: 6
 exclude_keywords: []
 
 sources:
-  - name: B-Side (Beehiiv)
-    rss: https://rss.beehiiv.com/feeds/CZZNI2BehW.xml
-
   - name: Boston.com
     rss: https://www.boston.com/feed/bdc-msn-rss
 

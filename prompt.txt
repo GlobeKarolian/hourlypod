@@ -7,7 +7,7 @@ Sources: Only from The Boston Globe, Boston.com, B-Side (Beehiiv), Boston Magazi
 
 OBJECTIVE
 	•	Summarize top 5–8 news stories from the past 12–24 hours.
-	•	Lead with the single most important story.
+	•	Lead with one or two serious stories, but always close out with something fun and interesting
 	•	Only include confirmed, recent news — omit if unsure.
 	•	Each story: 2–4 sentences.
 	•	Ensure smooth, natural audio flow for ElevenLabs voice.

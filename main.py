@@ -25,7 +25,7 @@ SH_NOTES   = PUBLIC_DIR / "shownotes"
 for d in (PUBLIC_DIR, EP_DIR, SH_NOTES):
     d.mkdir(parents=True, exist_ok=True)
 
-# --------------- LOAD FEEDS ----------------
+# -------------------- LOAD FEEDS --------------------
 feeds_path = ROOT / "feeds.yml"
 if feeds_path.exists():
     with open(feeds_path, "r", encoding="utf-8") as f:
@@ -36,7 +36,7 @@ SOURCES = cfg.get("sources", [])
 EXCLUDE = set(str(k).lower() for k in cfg.get("exclude_keywords", []))
 LIMIT_PER = int(cfg.get("daily_limit_per_source", cfg.get("limit_per_source", 6)))
 
-# --------------- TIME / GREETING ---------------
+# -------------------- TIME / GREETING --------------------
 def boston_now():
     now = dt.datetime.now(ZoneInfo("America/New_York"))
     hour = now.hour
@@ -50,7 +50,7 @@ def boston_now():
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
-# --------------- FEED FETCH / CLEAN ---------------
+# -------------------- FETCH / DEDUPE --------------------
 def is_newsworthy(title: str) -> bool:
     t = (title or "").lower()
     return bool(t and not any(k in t for k in EXCLUDE))
@@ -89,7 +89,7 @@ def dedupe(items, threshold=90):
             kept.append(it); seen.append(title)
     return kept
 
-# --------------- ARTICLE EXTRACTION ---------------
+# -------------------- EXTRACTION --------------------
 def extract_text(url: str) -> str:
     # 1) trafilatura first
     try:
@@ -135,7 +135,7 @@ def build_notes(items):
         used += 1
     return notes
 
-# --------------- OPENAI ---------------
+# -------------------- OPENAI --------------------
 try:
     from openai import OpenAI
     _client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -144,7 +144,7 @@ except Exception as e:
     _client = None
 
 def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
-    """Uses Responses for GPT-5 models (no temperature/max_tokens), Chat for GPT-4o."""
+    """Responses for GPT-5 models, Chat for GPT-4o."""
     if not _client or not OPENAI_MODEL:
         print("[diag] OpenAI client/model missing")
         return None
@@ -161,7 +161,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
     try:
         if OPENAI_MODEL.lower().startswith("gpt-5"):
-            # Responses API—use max_output_tokens, omit temperature if model rejects it
+            # Responses API—use max_output_tokens; omit temperature
             resp = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
@@ -170,7 +170,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             txt = getattr(resp, "output_text", None)
             if txt and len(txt.split()) > 25:
                 return txt.strip()
-            # try again with no cap if model ignores max_output_tokens
+            # retry without cap if model ignores max_output_tokens
             resp2 = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
@@ -206,65 +206,72 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             print(f"[warn] OpenAI fallback failed: {e2}")
             return None
 
-# --------------- ELEVENLABS ---------------
+# -------------------- TTS SANITIZER --------------------
+def sanitize_for_tts(s: str) -> str:
+    # Normalize punctuation & expand acronyms to reduce prosody “drag”
+    rep = (
+        ("—", ", "), ("–", ", "), ("…", ". "),
+        (" / ", " or "),
+    )
+    for a,b in rep:
+        s = s.replace(a,b)
+    # Expand a couple of Boston acronyms that get elongated
+    s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    # Collapse whitespace
+    return " ".join(s.split())
+
+# -------------------- ELEVENLABS (NON-STREAMING, LATENCY OFF) --------------------
 def _load_voice_settings():
-    # Prefer JSON file; otherwise optional python config
     vs_json = ROOT / "voice_settings.json"
     if vs_json.exists():
         try:
             return json.loads(vs_json.read_text(encoding="utf-8"))
         except Exception:
             pass
-    try:
-        # optional file you may have
-        import importlib.util
-        p = ROOT / "elevenlabs_config.py"
-        if p.exists():
-            spec = importlib.util.spec_from_file_location("elevenlabs_config", str(p))
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)  # type: ignore
-            return getattr(mod, "VOICE_SETTINGS", {})
-    except Exception:
-        pass
-    # conservative, natural defaults
     return {
-        "stability": 0.62,
-        "similarity_boost": 0.86,
-        "style": 0.35,
+        "stability": 0.72,
+        "similarity_boost": 0.90,
+        "style": 0.25,
         "use_speaker_boost": True,
-        "voice_speed": 0.98,     # slightly slower for natural phrasing
+        "voice_speed": 1.04,
         "model_id": "eleven_multilingual_v2"
     }
 
 def tts_elevenlabs(text: str) -> bytes | None:
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
-        print("[diag] skipping TTS; missing key/voice/text")
+        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
+
     settings = _load_voice_settings()
+    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+    # Force non-streaming + explicitly disable streaming latency + set output format
+    url = f"{base}?optimize_streaming_latency=0&output_format=mp3_44100_128"
+    print(f"[diag] ElevenLabs URL: {url}")
+
     payload = {
         "text": text,
-        "voice_settings": {
-            "stability": settings.get("stability", 0.62),
-            "similarity_boost": settings.get("similarity_boost", 0.86),
-            "style": settings.get("style", 0.35),
-            "use_speaker_boost": settings.get("use_speaker_boost", True),
-        },
-        "voice_speed": settings.get("voice_speed", 0.98),
         "model_id": settings.get("model_id", "eleven_multilingual_v2"),
+        "voice_settings": {
+            "stability": settings.get("stability", 0.72),
+            "similarity_boost": settings.get("similarity_boost", 0.90),
+            "style": settings.get("style", 0.25),
+            "use_speaker_boost": bool(settings.get("use_speaker_boost", True))
+        },
+        "voice_speed": settings.get("voice_speed", 1.04)
     }
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json"
     }
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+
     r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=180)
     if r.status_code >= 400:
         print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:200]}", file=sys.stderr)
         return None
     return r.content
 
-# --------------- OUTPUT: SHOWNOTES / FEED / INDEX ---------------
+# -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):
     html = ["<html><head><meta charset='utf-8'><title>Boston Briefing – Sources</title></head><body>"]
     html.append(f"<h2>Boston Briefing – {date_str}</h2>")
@@ -327,10 +334,10 @@ def build_feed(episode_url: str, filesize: int):
     ]
     (PUBLIC_DIR / "feed.xml").write_text("\n".join(feed), encoding="utf-8")
 
-# --------------- MAIN ----------------
+# -------------------- MAIN --------------------
 def main():
     print("[diag] starting run…")
-    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_API_KEY=*** OPENAI_MODEL=*** ELEVEN_API_KEY=*** ELEVEN_VOICE_ID=*** MAX_ITEMS={MAX_ITEMS}")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_API_KEY=*** OPENAI_MODEL={OPENAI_MODEL} ELEVEN_API_KEY=*** ELEVEN_VOICE_ID=*** MAX_ITEMS={MAX_ITEMS}")
 
     raw = fetch_items()
     print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
@@ -346,15 +353,18 @@ def main():
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
 
-    # Ask OpenAI to write script
+    # Generate script
     script = None
     if prompt_text.strip() and notes:
         script = rewrite_with_openai(prompt_text, notes)
 
-    # Graceful fallback if OpenAI fails or returns too-short text
+    # Fallback text if GPT failed/empty
     if not script or len(script.split()) < 25:
         script = ("Ooops, something went wrong. Sorry about that. "
                   "Why don't you email Matt Karolian so I can fix it.")
+
+    # Sanitize for smoother TTS pacing
+    script = sanitize_for_tts(script)
 
     print("\n--- SCRIPT TO READ ---\n")
     print(script.strip())
@@ -385,7 +395,6 @@ def main():
         ep_url = f"{PUBLIC_BASE_URL}/episodes/{ep_name}" if PUBLIC_BASE_URL else f"episodes/{ep_name}"
         print(f"[diag] saved MP3: {ep_path} ({filesize} bytes)")
     else:
-        # write a small fallback mp3? (We already set a spoken fallback script text above.)
         print("[diag] MP3 not created; continuing with feed + site")
 
     build_feed(ep_url, filesize)

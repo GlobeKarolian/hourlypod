@@ -1,88 +1,266 @@
-# Add this function after your imports and before the TTS function
+# main.py
+import os, sys, json, datetime as dt
+from pathlib import Path
+from email.utils import format_datetime
+from zoneinfo import ZoneInfo
 
-def load_voice_settings():
-    """Load voice settings from external config files."""
-    # Try voice_settings.json first
-    voice_json_path = ROOT / "voice_settings.json"
-    if voice_json_path.exists():
+import yaml, feedparser, requests
+from bs4 import BeautifulSoup
+from readability import Document
+import trafilatura
+from rapidfuzz import fuzz, process
+
+# -------------------- ENV / CONFIG --------------------
+ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY", "").strip()
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "").strip()
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+MAX_ITEMS       = int(os.getenv("MAX_ITEMS", "10"))
+
+ROOT       = Path(".")
+PUBLIC_DIR = ROOT / "public"
+EP_DIR     = PUBLIC_DIR / "episodes"
+SH_NOTES   = PUBLIC_DIR / "shownotes"
+for d in (PUBLIC_DIR, EP_DIR, SH_NOTES):
+    d.mkdir(parents=True, exist_ok=True)
+
+# -------------------- LOAD FEEDS --------------------
+feeds_path = ROOT / "feeds.yml"
+if feeds_path.exists():
+    with open(feeds_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+else:
+    cfg = {"sources": []}
+SOURCES = cfg.get("sources", [])
+EXCLUDE = set(str(k).lower() for k in cfg.get("exclude_keywords", []))
+LIMIT_PER = int(cfg.get("daily_limit_per_source", cfg.get("limit_per_source", 6)))
+
+# -------------------- TIME / GREETING --------------------
+def boston_now():
+    now = dt.datetime.now(ZoneInfo("America/New_York"))
+    hour = now.hour
+    if 5 <= hour < 12:
+        tod = "morning"
+    elif 12 <= hour < 18:
+        tod = "afternoon"
+    else:
+        tod = "evening"
+    # “Monday, August 11, 2025” without %-d for Windows
+    pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
+    return now, tod, pretty_date
+
+# -------------------- FETCH / DEDUPE --------------------
+def is_newsworthy(title: str) -> bool:
+    t = (title or "").lower()
+    return bool(t and not any(k in t for k in EXCLUDE))
+
+def fetch_items():
+    items = []
+    for src in SOURCES:
+        name = src.get("name","Unknown")
+        rss  = src.get("rss","").strip()
+        if not rss:
+            continue
         try:
-            with open(voice_json_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-                print(f"[diag] Loaded voice settings from {voice_json_path}")
-                return settings
-        except Exception as e:
-            print(f"[warn] Failed to load {voice_json_path}: {e}")
-    
-    # Fallback to elevenlabs_config.py
-    config_path = ROOT / "elevenlabs_config.py"
-    if config_path.exists():
-        try:
-            # Import the config values
-            import sys
-            sys.path.insert(0, str(ROOT))
-            import elevenlabs_config as cfg
-            settings = {
-                "model_id": cfg.MODEL_ID,
-                "voice_settings": {
-                    "stability": cfg.STABILITY,
-                    "similarity_boost": cfg.SIMILARITY_BOOST,
-                    "style": cfg.STYLE,
-                    "use_speaker_boost": cfg.USE_SPEAKER_BOOST
-                },
-                "voice_speed": cfg.VOICE_SPEED
-            }
-            print(f"[diag] Loaded voice settings from {config_path}")
-            return settings
-        except Exception as e:
-            print(f"[warn] Failed to load {config_path}: {e}")
-    
-    # Final fallback to hardcoded values
-    print("[diag] Using fallback voice settings")
-    return {
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.85,
+            fp = feedparser.parse(rss)
+            count = 0
+            for e in fp.entries:
+                if count >= LIMIT_PER: break
+                title = (e.get("title") or "").strip()
+                link  = (e.get("link") or "").strip()
+                if not title or not link: continue
+                if not is_newsworthy(title): continue
+                summary = (e.get("summary") or e.get("description") or "").strip()
+                items.append({"source": name, "title": title, "link": link, "summary": summary})
+                count += 1
+        except Exception as ex:
+            print(f"[warn] feed error {name}: {ex}", file=sys.stderr)
+    return items
+
+def dedupe(items, threshold=90):
+    kept, seen = [], []
+    for it in items:
+        title = it["title"]
+        if not seen:
+            kept.append(it); seen.append(title); continue
+        match = process.extractOne(title, seen, scorer=fuzz.token_set_ratio)
+        if not match or match[1] < threshold:
+            kept.append(it); seen.append(title)
+    return kept
+
+# -------------------- EXTRACTION --------------------
+def extract_text(url: str) -> str:
+    # 1) trafilatura first
+    try:
+        downloaded = trafilatura.fetch_url(url, timeout=25)
+        if downloaded:
+            extracted = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+            if extracted and len(extracted.split()) > 40:
+                return extracted
+    except Exception:
+        pass
+    # 2) readability fallback
+    try:
+        r = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0 (compatible; BostonBriefing/1.0)"})
+        r.raise_for_status()
+        doc = Document(r.text)
+        text = BeautifulSoup(doc.summary(), "html.parser").get_text("\n")
+        lines = [l.strip() for l in text.splitlines() if len(l.split()) > 4]
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+def first_sentence(text: str) -> str:
+    text = " ".join(text.split())
+    for sep in [". ", " — ", " – ", " • "]:
+        if sep in text:
+            cand = text.split(sep)[0]
+            if len(cand.split()) >= 8:
+                return cand.strip(".•–— ")
+    return text[:240].rsplit(" ",1)[0]
+
+def build_notes(items):
+    notes, used = [], 0
+    for it in items:
+        if used >= MAX_ITEMS: break
+        txt = extract_text(it["link"])
+        if not txt:
+            txt = it.get("summary") or it["title"]
+        sent = first_sentence(txt)
+        if len(sent.split()) < 6:
+            continue
+        notes.append(f"{it['source']}: {sent}  (link: {it['link']})")
+        used += 1
+    return notes
+
+# -------------------- OPENAI --------------------
+try:
+    from openai import OpenAI
+    _client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+except Exception as e:
+    print(f"[warn] openai import failed: {e}", file=sys.stderr)
+    _client = None
+
+def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
+    if not _client or not OPENAI_MODEL:
+        print("[diag] OpenAI client/model missing")
+        return None
+
+    _, tod, pretty_date = boston_now()
+    sys_preamble = (
+        "HARD CONSTRAINTS:\n"
+        f"- Opening line MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
+        "- Lead with the most important local news; do not lead with sports unless it’s clearly the top story.\n"
+        "- Absolutely no editorializing, sympathy, or sentiment.\n"
+        "- Attribute sources naturally in-line (The Boston Globe, Boston.com, B-Side).\n"
+        "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
+    )
+    user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
+
+    try:
+        if OPENAI_MODEL.lower().startswith("gpt-5"):
+            resp = _client.responses.create(
+                model=OPENAI_MODEL,
+                input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
+                max_output_tokens=1200,
+            )
+            return (getattr(resp, "output_text", "") or "").strip()
+        else:
+            resp = _client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role":"system","content":sys_preamble},
+                    {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
+                ],
+                temperature=0.35,
+                max_tokens=1200,
+            )
+            return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[warn] OpenAI generation failed: {e}")
+        return None
+
+# -------------------- FALLBACK SCRIPT (no more “Ooops”) --------------------
+def fallback_script(notes: list[str]) -> str:
+    if not notes:
+        return ("I couldn't fetch stories just now. Check the feeds in feeds.yml "
+                "and try again in a few minutes.")
+    now, tod, pretty_date = boston_now()
+    lines = [f"Good {tod}, it’s {pretty_date}.", "Here’s what’s happening around Boston:"]
+    for n in notes[:6]:
+        spoken = n.split("(link:")[0].strip().rstrip(".")
+        lines.append(f"{spoken}.")
+    lines.append("That’s the Boston Briefing. This is an internal beta—please don’t share externally.")
+    return " ".join(lines)
+
+# -------------------- TTS SANITIZER --------------------
+def sanitize_for_tts(s: str) -> str:
+    rep = (("—", ", "), ("–", ", "), ("…", ". "), (" / ", " or "))
+    for a,b in rep:
+        s = s.replace(a,b)
+    s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    return " ".join(s.split())
+
+# -------------------- ElevenLabs config loader (single source: voice_settings.json) --------------------
+def _load_voice_settings_from_json():
+    cfg_path = ROOT / "voice_settings.json"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        model_id = (data.get("model_id") or "eleven_multilingual_v2").strip()
+        vs = data.get("voice_settings") or {}
+        voice_settings = {
+            "stability": float(vs.get("stability", 0.80)),
+            "similarity_boost": float(vs.get("similarity_boost", 0.90)),
+            "style": float(vs.get("style", 0.15)),
+            "use_speaker_boost": bool(vs.get("use_speaker_boost", True)),
+            "voice_speed": float(vs.get("voice_speed", 1.00)),
+        }
+        return model_id, voice_settings
+    except Exception as e:
+        print(f"[warn] failed to read voice_settings.json, using defaults: {e}", file=sys.stderr)
+        return "eleven_multilingual_v2", {
+            "stability": 0.80,
             "similarity_boost": 0.90,
             "style": 0.15,
-            "use_speaker_boost": True
-        },
-        "voice_speed": 1.0
-    }
+            "use_speaker_boost": True,
+            "voice_speed": 1.00,
+        }
 
-
+# -------------------- ELEVENLABS (single clean request using JSON settings) --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    TTS request using external config files for consistency.
+    Non-streaming HTTP request to ElevenLabs.
+    All tuning comes from voice_settings.json (single source of truth).
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    # Load settings from config files
-    voice_config = load_voice_settings()
-    
-    # Enhanced sanitization for mid-sentence consistency
-    text = sanitize_for_tts(text)
-    
-    # Debug output
-    print(f"[diag] Using model: {voice_config['model_id']}")
-    print(f"[diag] Voice settings: {voice_config['voice_settings']}")
-    print(f"[diag] Sanitized text length: {len(text)} chars")
-    
+    model_id, vs = _load_voice_settings_from_json()
+
+    # Non-streaming endpoint; no streaming params; explicit output format
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url = f"{base}?output_format=mp3_44100_128"
+    url  = f"{base}?output_format=mp3_44100_128"
 
     payload = {
         "text": text,
-        "model_id": voice_config["model_id"],
-        "voice_settings": voice_config["voice_settings"],
-        "voice_speed": voice_config["voice_speed"]
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": vs["stability"],
+            "similarity_boost": vs["similarity_boost"],
+            "style": vs["style"],
+            "use_speaker_boost": vs["use_speaker_boost"],
+            # keep voice_speed inside voice_settings to keep one cohesive schema
+            "voice_speed": vs["voice_speed"],
+        }
     }
 
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "connection": "close",
     }
 
     try:
@@ -99,70 +277,134 @@ def tts_elevenlabs(text: str) -> bytes | None:
         print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
         return None
 
+# -------------------- OUTPUT (SITE/FEED) --------------------
+def write_shownotes(date_str, items):
+    html = ["<html><head><meta charset='utf-8'><title>Boston Briefing – Sources</title></head><body>"]
+    html.append(f"<h2>Boston Briefing – {date_str}</h2>")
+    html.append("<ol>")
+    take = 0
+    for it in items:
+        if take >= MAX_ITEMS: break
+        html.append(f"<li><a href='{it['link']}' target='_blank' rel='noopener'>{it['title']}</a> – {it['source']}</li>")
+        take += 1
+    html.append("</ol></body></html>")
+    (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
-def sanitize_for_tts(s: str) -> str:
-    """Enhanced TTS sanitization to prevent mid-sentence slowdowns."""
-    import re
-    
-    # 1. Handle numbers that cause TTS to slow down
-    s = re.sub(r'\b(\d{1,3}),(\d{3})\b', r'\1 thousand \2', s)  # 1,500 -> 1 thousand 500
-    s = re.sub(r'\$(\d+)\.(\d{2})\b', r'\1 dollars and \2 cents', s)  # $15.99
-    s = re.sub(r'\$(\d+)\b', r'\1 dollars', s)  # $15
-    
-    # 2. Handle dates and times
-    s = re.sub(r'\b(\d{1,2}):(\d{2})\s*(AM|PM)\b', r'\1 \2 \3', s, flags=re.IGNORECASE)
-    
-    # 3. Simplify complex punctuation within sentences
-    replacements = [
-        ("—", " "),            # em dash (no pause needed)
-        ("–", " "),            # en dash
-        ("...", "."),          # multiple periods
-        (" / ", " or "),       # slashes
-        (" & ", " and "),      # ampersands
-        ("'", "'"),            # normalize apostrophes
-        (""", '"'),            # normalize quotes
-        (""", '"'),            # normalize quotes
-        (")", " "),            # Remove closing parens
-        (";", ","),            # Semicolons often cause hesitation
+def write_index_if_missing():
+    idx = PUBLIC_DIR / "index.html"
+    if idx.exists():
+        return
+    url = f"{PUBLIC_BASE_URL}/feed.xml" if PUBLIC_BASE_URL else "feed.xml"
+    html = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Boston Briefing</title></head>
+<body>
+  <h1>Boston Briefing</h1>
+  <p>Podcast RSS: <a href="{url}">{url}</a></p>
+  <p>Shownotes: <a href="shownotes/">Open folder</a></p>
+</body></html>"""
+    idx.write_text(html, encoding="utf-8")
+
+def build_feed(episode_url: str, filesize: int):
+    title = "Boston Briefing"
+    desc  = "A short, factual Boston news briefing."
+    link  = PUBLIC_BASE_URL or ""
+    now = dt.datetime.now().astimezone()
+    last_build = format_datetime(now)
+    item_title = now.strftime("Boston Briefing – %Y-%m-%d")
+    guid = episode_url or item_title
+    enclosure = f'<enclosure url="{episode_url}" length="{filesize}" type="audio/mpeg"/>' if episode_url else ""
+    feed = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">',
+        '  <channel>',
+        f'    <title>{title}</title>',
+        f'    <link>{link}</link>',
+        '    <language>en-us</language>',
+        f'    <description>{desc}</description>',
+        '    <itunes:author>Boston Briefing</itunes:author>',
+        '    <itunes:explicit>false</itunes:explicit>',
+        f'    <lastBuildDate>{last_build}</lastBuildDate>',
+        '    <item>',
+        f'      <title>{item_title}</title>',
+        f'      <description>{desc}</description>',
+        f'      <link>{episode_url}</link>',
+        f'      <guid isPermaLink="false">{guid}</guid>',
+        f'      <pubDate>{last_build}</pubDate>',
+        f'      {enclosure}',
+        '    </item>',
+        '  </channel>',
+        '</rss>',
+        ''
     ]
-    
-    for old, new in replacements:
-        s = s.replace(old, new)
-    
-    # 4. Remove parenthetical content that causes hesitation
-    s = re.sub(r'\([^)]*', '', s)  # Remove opening paren and everything after
-    
-    # 5. Handle abbreviations that get elongated - using your existing logic but enhanced
-    s = s.replace("MBTA", "M B T A")  # Space them out
-    s = s.replace("BPL", "B P L")
-    
-    # Additional Boston-specific terms
-    boston_terms = {
-        "MIT": "M I T",
-        "BU": "Boston University",
-        "BC": "Boston College", 
-        "Mass Pike": "Massachusetts Turnpike",
-        "Storrow": "Storrow Drive",
-        "Fenway": "Fenway Park",
-    }
-    
-    for term, replacement in boston_terms.items():
-        s = re.sub(rf'\b{term}\b', replacement, s, flags=re.IGNORECASE)
-    
-    # 6. Handle Boston place names that cause issues
-    problem_words = {
-        "Quincy": "Quin-see",
-        "Worcester": "Woo-ster", 
-        "Gloucester": "Gloss-ter",
-        "Leominster": "Lemm-in-ster",
-    }
-    
-    for word, pronunciation in problem_words.items():
-        s = re.sub(rf'\b{word}\b', pronunciation, s, flags=re.IGNORECASE)
-    
-    # 7. Clean up spacing
-    s = re.sub(r'\s+', ' ', s)
-    s = re.sub(r'\s*,\s*', ', ', s)    
-    s = re.sub(r'\s*\.\s*', '. ', s)   
-    
-    return s.strip()
+    (PUBLIC_DIR / "feed.xml").write_text("\n".join(feed), encoding="utf-8")
+
+# -------------------- MAIN --------------------
+def main():
+    print("[diag] starting run…")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
+
+    raw = fetch_items()
+    print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
+    deduped = dedupe(raw)
+    print(f"[diag] total after dedupe: {len(deduped)}")
+
+    notes = build_notes(deduped)
+    print(f"[diag] notes built: {len(notes)}")
+    if deduped:
+        print("[diag] sample titles:")
+        for it in deduped[:5]:
+            print(" -", it["title"])
+
+    # Load newsroom prompt (editable file)
+    prompt_text = ""
+    p = ROOT / "prompt.txt"
+    if p.exists():
+        prompt_text = p.read_text(encoding="utf-8")
+
+    # Generate script via GPT, else fallback
+    script = None
+    if prompt_text.strip() and notes:
+        script = rewrite_with_openai(prompt_text, notes)
+    if not script or len(script.split()) < 25:
+        script = fallback_script(notes)
+
+    # Light sanitize for smoother TTS pacing
+    script = sanitize_for_tts(script)
+
+    print("\n--- SCRIPT TO READ ---\n")
+    print(script.strip())
+    print("\n--- END SCRIPT ---\n")
+
+    # Output artifacts
+    today = dt.datetime.now(ZoneInfo("America/New_York"))
+    date_str = today.strftime("%Y-%m-%d")
+
+    write_shownotes(date_str, deduped)
+    write_index_if_missing()
+
+    # TTS + feed
+    mp3_bytes = None
+    try:
+        mp3_bytes = tts_elevenlabs(script)
+    except Exception as ex:
+        print(f"[warn] ElevenLabs error: {ex}", file=sys.stderr)
+
+    ep_url = ""
+    filesize = 0
+    ep_name = f"boston-briefing-{date_str}.mp3"
+    ep_path = EP_DIR / ep_name
+
+    if mp3_bytes:
+        ep_path.write_bytes(mp3_bytes)
+        filesize = len(mp3_bytes)
+        ep_url = f"{PUBLIC_BASE_URL}/episodes/{ep_name}" if PUBLIC_BASE_URL else f"episodes/{ep_name}"
+        print(f"[diag] saved MP3: {ep_path} ({filesize} bytes)")
+    else:
+        print("[diag] MP3 not created; continuing with feed + site")
+
+    build_feed(ep_url, filesize)
+    print("[diag] done.")
+
+if __name__ == "__main__":
+    main()

@@ -1,10 +1,10 @@
 {
   "model_id": "eleven_multilingual_v2",
   "voice_settings": {
-    "stability": 0.80,
-    "similarity_boost": 0.90,
-    "style": 0.15,
-    "use_speaker_boost": true,
-    "voice_speed": 1.00
-  }
+    "stability": 0.90,
+    "similarity_boost": 0.85,
+    "style": 0.10,
+    "use_speaker_boost": true
+  },
+  "voice_speed": 1.05
 }

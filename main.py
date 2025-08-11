@@ -212,7 +212,7 @@ def sanitize_for_tts(s: str) -> str:
     s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
     return " ".join(s.split())
 
-# -------------------- ELEVENLABS (CLEAN NON-STREAMING) --------------------
+# -------------------- ELEVENLABS (CLEAN NON-STREAMING, CLAUDE VARIANT) --------------------
 def _load_voice_settings():
     vs_json = ROOT / "voice_settings.json"
     if vs_json.exists():
@@ -229,19 +229,23 @@ def _load_voice_settings():
         "model_id": "eleven_multilingual_v2"
     }
 
-def tts_elevenlabs(text: str) -> bytes | None:
-    if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
-        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
-        return None
+def _tts_payload_voice_speed_inside(s, text):
+    # Claude's requested placement: voice_speed inside voice_settings
+    return {
+        "text": text,
+        "model_id": s.get("model_id", "eleven_multilingual_v2"),
+        "voice_settings": {
+            "stability": s.get("stability", 0.72),
+            "similarity_boost": s.get("similarity_boost", 0.90),
+            "style": s.get("style", 0.25),
+            "use_speaker_boost": bool(s.get("use_speaker_boost", True)),
+            "voice_speed": s.get("voice_speed", 1.04),
+        }
+    }
 
-    s = _load_voice_settings()
-
-    # Clean non-streaming endpoint; no streaming params; explicit format is fine
-    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url  = f"{base}?output_format=mp3_44100_128"
-    print(f"[diag] ElevenLabs URL: {url}")
-
-    payload = {
+def _tts_payload_voice_speed_top_level(s, text):
+    # Fallback if the API rejects the above schema
+    return {
         "text": text,
         "model_id": s.get("model_id", "eleven_multilingual_v2"),
         "voice_settings": {
@@ -250,21 +254,41 @@ def tts_elevenlabs(text: str) -> bytes | None:
             "style": s.get("style", 0.25),
             "use_speaker_boost": bool(s.get("use_speaker_boost", True)),
         },
-        # IMPORTANT: voice_speed is top-level per API schema
         "voice_speed": s.get("voice_speed", 1.04),
     }
+
+def tts_elevenlabs(text: str) -> bytes | None:
+    if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
+        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
+        return None
+
+    s = _load_voice_settings()
+
+    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+    url  = f"{base}?output_format=mp3_44100_128"
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json"
     }
 
+    # 1) Try Claude's schema first (voice_speed inside voice_settings)
+    payload = _tts_payload_voice_speed_inside(s, text)
     r = requests.post(url, headers=headers, json=payload, timeout=180)
-    if r.status_code >= 400:
-        print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
-        return None
-    print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
-    return r.content
+    if r.status_code < 400:
+        print(f"[diag] ElevenLabs success (inside): {len(r.content)} bytes")
+        return r.content
+    print(f"[warn] ElevenLabs (inside) {r.status_code}: {r.text[:300]}", file=sys.stderr)
+
+    # 2) Fallback to top-level voice_speed if the first attempt failed
+    payload2 = _tts_payload_voice_speed_top_level(s, text)
+    r2 = requests.post(url, headers=headers, json=payload2, timeout=180)
+    if r2.status_code < 400:
+        print(f"[diag] ElevenLabs success (top-level fallback): {len(r2.content)} bytes")
+        return r2.content
+
+    print(f"[warn] ElevenLabs failed both schemas; last {r2.status_code}: {r2.text[:300]}", file=sys.stderr)
+    return None
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):

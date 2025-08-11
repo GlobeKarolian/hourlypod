@@ -1,8 +1,14 @@
 {
-  "stability": 0.55,
-  "similarity_boost": 0.85,
-  "style": 0.4,
-  "voice_speed": 1.05,
+  "stability": 0.62,
+  "similarity_boost": 0.88,
+  "style": 0.48,
   "use_speaker_boost": true,
-  "model_id": "eleven_multilingual_v2"
+  "voice_speed": 1.04,
+  "pitch": 0.0,
+  "intonation": 0.12,
+  "pauses": {
+    "comma_pause": 0.06,
+    "sentence_pause": 0.14,
+    "paragraph_pause": 0.2
+  }
 }

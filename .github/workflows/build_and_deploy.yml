@@ -1,18 +1,12 @@
 name: Build & Deploy
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "5 * * * *"   # every hour at :05 (optional)
+  workflow_dispatch:
 
 permissions:
   contents: write
   pages: write
   id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,7 +17,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-
       - name: Build episode
         env:
           PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
@@ -31,11 +24,7 @@ jobs:
           OPENAI_MODEL:    ${{ secrets.OPENAI_MODEL }}
           ELEVEN_API_KEY:  ${{ secrets.ELEVEN_API_KEY }}
           ELEVEN_VOICE_ID: ${{ secrets.ELEVEN_VOICE_ID }}
-          MAX_ITEMS:       ${{ secrets.MAX_ITEMS }}
-        run: |
-          python main.py
-          echo "public" > .artifact_path
-
+        run: python main.py
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:

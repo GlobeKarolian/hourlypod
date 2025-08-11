@@ -1,13 +1,13 @@
-Boston Briefing – Script Guidelines
+You are going to write a script for a 2-3 min audio update, summarizing the latest news about Boston
 
 Audience: Busy Boston-area listeners wanting a concise, accurate 2–3 minute audio update (300–450 words).
-Sources: Only from The Boston Globe, Boston.com, B-Side (Beehiiv), Boston Magazine.
+Sources: Only from The Boston Globe, Boston.com, B-Side (Beehiiv), Boston Magazine. 
 
 ⸻
 
 OBJECTIVE
 	•	Summarize top 5–8 news stories from the past 12–24 hours.
-	•	Lead with one or two serious stories, but always close out with something fun and interesting
+	•	Lead with the single most important story.
 	•	Only include confirmed, recent news — omit if unsure.
 	•	Each story: 2–4 sentences.
 	•	Ensure smooth, natural audio flow for ElevenLabs voice.
@@ -76,7 +76,3 @@ CLOSING
 	•	Weather + notable events.
 	•	End with:
 “That’s the Boston Briefing. This script was written by AI and voiced using an AI clone of Matt Karolian’s voice. This is an internal beta — please do not share externally.”
-
-⸻
-
-If you want, I can now make an ultra-streamlined “one-paragraph” version for direct copy-paste into your workflow. Would you like me to do that?

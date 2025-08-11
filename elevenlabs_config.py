@@ -4,4 +4,4 @@ SIMILARITY_BOOST = 0.88
 STYLE = 0.48
 USE_SPEAKER_BOOST = True
 VOICE_SPEED = 1.04
-MODEL_ID = "eleven_multilingual_v2"
+MODEL_ID = "eleven_v3"

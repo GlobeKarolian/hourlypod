@@ -1,53 +1,9 @@
 # main.py
-
-# --- ElevenLabs voice settings loader ---
-def load_voice_settings(config_path: str = "voice_settings.json"):
-    """
-    Load ElevenLabs TTS settings from a JSON file.
-    Expected structure:
-    {
-      "model_id": "eleven_multilingual_v2",
-      "voice_settings": {
-        "stability": 0.90,
-        "similarity_boost": 0.85,
-        "style": 0.10,
-        "use_speaker_boost": true
-      },
-      "voice_speed": 1.05
-    }
-    Falls back to sane defaults if missing or invalid.
-    """
-    defaults = {
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.80,
-            "similarity_boost": 0.90,
-            "style": 0.15,
-            "use_speaker_boost": True
-        },
-        "voice_speed": 1.00
-    }
-    try:
-        import json
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f) or {}
-        out = defaults.copy()
-        out["model_id"] = cfg.get("model_id", out["model_id"])
-        vs_in = cfg.get("voice_settings") or {}
-        vs = out["voice_settings"].copy()
-        vs.update({k: v for k, v in vs_in.items() if k in vs})
-        out["voice_settings"] = vs
-        if isinstance(cfg.get("voice_speed"), (int, float)):
-            out["voice_speed"] = float(cfg["voice_speed"])
-        return out
-    except Exception as e:
-        print(f"[diag] load_voice_settings fallback due to: {e}")
-        return defaults
-
 import os, sys, json, datetime as dt
 from pathlib import Path
 from email.utils import format_datetime
 from zoneinfo import ZoneInfo
+
 import yaml, feedparser, requests
 from bs4 import BeautifulSoup
 from readability import Document
@@ -90,6 +46,7 @@ def boston_now():
         tod = "afternoon"
     else:
         tod = "evening"
+    # “Monday, August 11, 2025” without %-d for Windows
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
@@ -134,6 +91,7 @@ def dedupe(items, threshold=90):
 
 # -------------------- EXTRACTION --------------------
 def extract_text(url: str) -> str:
+    # 1) trafilatura first
     try:
         downloaded = trafilatura.fetch_url(url, timeout=25)
         if downloaded:
@@ -142,8 +100,9 @@ def extract_text(url: str) -> str:
                 return extracted
     except Exception:
         pass
+    # 2) readability fallback
     try:
-        r = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0"})
+        r = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0 (compatible; BostonBriefing/1.0)"})
         r.raise_for_status()
         doc = Document(r.text)
         text = BeautifulSoup(doc.summary(), "html.parser").get_text("\n")
@@ -167,6 +126,7 @@ def build_notes(items):
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
         if not txt:
+            # fall back to feed summary/title so we never end up empty
             txt = it.get("summary") or it["title"]
         sent = first_sentence(txt)
         if len(sent.split()) < 6:
@@ -184,16 +144,19 @@ except Exception as e:
     _client = None
 
 def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
+    """Responses for GPT-5 models, Chat for GPT-4o."""
     if not _client or not OPENAI_MODEL:
+        print("[diag] OpenAI client/model missing")
         return None
+
     now, tod, pretty_date = boston_now()
     sys_preamble = (
         "HARD CONSTRAINTS:\n"
         f"- Opening line MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
-        "- Lead with the most important local news.\n"
-        "- No editorializing.\n"
-        "- Attribute sources naturally.\n"
-        "- 5–8 items; smooth transitions; quick weather/events; beta disclosure.\n"
+        "- Lead with the most important local news; do not lead with sports unless it’s clearly the top story.\n"
+        "- Absolutely no editorializing, sympathy, or sentiment.\n"
+        "- Attribute sources naturally in-line (The Boston Globe, Boston.com, B-Side).\n"
+        "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
     )
     user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
     try:
@@ -203,7 +166,15 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
                 max_output_tokens=1200,
             )
-            return getattr(resp, "output_text", "").strip()
+            txt = getattr(resp, "output_text", None)
+            if txt and len(txt.split()) > 25:
+                return txt.strip()
+            # retry w/o cap if needed
+            resp2 = _client.responses.create(
+                model=OPENAI_MODEL,
+                input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
+            )
+            return (getattr(resp2, "output_text", "") or "").strip()
         else:
             resp = _client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -215,102 +186,212 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
                 max_tokens=1200,
             )
             return (resp.choices[0].message.content or "").strip()
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"[warn] OpenAI generation failed: {e}")
+        try:
+            resp = _client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role":"system","content":sys_preamble},
+                    {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
+                ],
+                temperature=0.35,
+                max_tokens=1200,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e2:
+            print(f"[warn] OpenAI fallback failed: {e2}")
+            return None
 
 # -------------------- TTS SANITIZER --------------------
 def sanitize_for_tts(s: str) -> str:
-    rep = (("—", ", "), ("–", ", "), ("…", ". "), (" / ", " or "))
+    # Normalize punctuation & expand acronyms to reduce prosody “drag”
+    rep = (
+        ("—", ", "), ("–", ", "), ("…", ". "),
+        (" / ", " or "),
+    )
     for a,b in rep:
         s = s.replace(a,b)
+    # Expand a couple of Boston acronyms that get elongated
     s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    # Collapse whitespace
     return " ".join(s.split())
 
 # -------------------- ELEVENLABS (SINGLE CLEAN REQUEST) --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
+    """
+    Single clean TTS request to ElevenLabs (non-streaming).
+    Uses top-level voice_speed and conservative 'news anchor' settings.
+    """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
+        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
+
+    # Non-streaming endpoint; explicit output format; no streaming params
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
     url  = f"{base}?output_format=mp3_44100_128"
-    cfg = load_voice_settings("voice_settings.json")
+
     payload = {
         "text": text,
-        "model_id": cfg.get("model_id", "eleven_multilingual_v2"),
-        "voice_settings": cfg.get("voice_settings", {}),
-        "voice_speed": cfg.get("voice_speed", 1.0)
+        "model_id": "eleven_multilingual_v2",  # steady, high-quality long-form
+        "voice_settings": {
+            "stability": 0.80,        # consistent pacing
+            "similarity_boost": 0.90, # keep timbre close
+            "style": 0.15,            # low drama for news
+            "use_speaker_boost": True
+        },
+        # IMPORTANT: voice_speed at top-level (not inside voice_settings)
+        "voice_speed": 1.00
     }
+
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json"
     }
+
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=180)
         if r.status_code >= 400:
+            print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
+        print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
         return r.content
-    except Exception:
+    except requests.exceptions.Timeout:
+        print("[warn] ElevenLabs request timed out", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
         return None
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):
-    html = [f"<h2>Boston Briefing – {date_str}</h2>", "<ol>"]
-    for it in items[:MAX_ITEMS]:
-        html.append(f"<li><a href='{it['link']}'>{it['title']}</a> – {it['source']}</li>")
-    html.append("</ol>")
+    html = ["<html><head><meta charset='utf-8'><title>Boston Briefing – Sources</title></head><body>"]
+    html.append(f"<h2>Boston Briefing – {date_str}</h2>")
+    html.append("<ol>")
+    take = 0
+    for it in items:
+        if take >= MAX_ITEMS: break
+        html.append(f"<li><a href='{it['link']}' target='_blank' rel='noopener'>{it['title']}</a> – {it['source']}</li>")
+        take += 1
+    html.append("</ol></body></html>")
     (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
 def write_index_if_missing():
+    """Only scaffold if you haven't uploaded your own UI."""
     idx = PUBLIC_DIR / "index.html"
     if idx.exists():
         return
     url = f"{PUBLIC_BASE_URL}/feed.xml" if PUBLIC_BASE_URL else "feed.xml"
-    html = f"<h1>Boston Briefing</h1><p>Podcast RSS: <a href='{url}'>{url}</a></p>"
+    html = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Boston Briefing</title></head>
+<body>
+  <h1>Boston Briefing</h1>
+  <p>Podcast RSS: <a href="{url}">{url}</a></p>
+  <p>Shownotes: <a href="shownotes/">Open folder</a></p>
+</body></html>"""
     idx.write_text(html, encoding="utf-8")
 
 def build_feed(episode_url: str, filesize: int):
     title = "Boston Briefing"
     desc  = "A short, factual Boston news briefing."
+    link  = PUBLIC_BASE_URL or ""
     now = dt.datetime.now().astimezone()
     last_build = format_datetime(now)
     item_title = now.strftime("Boston Briefing – %Y-%m-%d")
     guid = episode_url or item_title
     enclosure = f'<enclosure url="{episode_url}" length="{filesize}" type="audio/mpeg"/>' if episode_url else ""
     feed = [
-        '<?xml version="1.0"?>',
-        '<rss version="2.0"><channel>',
-        f'<title>{title}</title><description>{desc}</description>',
-        f'<lastBuildDate>{last_build}</lastBuildDate>',
-        f'<item><title>{item_title}</title>{enclosure}</item>',
-        '</channel></rss>'
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">',
+        '  <channel>',
+        f'    <title>{title}</title>',
+        f'    <link>{link}</link>',
+        '    <language>en-us</language>',
+        f'    <description>{desc}</description>',
+        '    <itunes:author>Boston Briefing</itunes:author>',
+        '    <itunes:explicit>false</itunes:explicit>',
+        f'    <lastBuildDate>{last_build}</lastBuildDate>',
+        '    <item>',
+        f'      <title>{item_title}</title>',
+        f'      <description>{desc}</description>',
+        f'      <link>{episode_url}</link>',
+        f'      <guid isPermaLink="false">{guid}</guid>',
+        f'      <pubDate>{last_build}</pubDate>',
+        f'      {enclosure}',
+        '    </item>',
+        '  </channel>',
+        '</rss>',
+        ''
     ]
     (PUBLIC_DIR / "feed.xml").write_text("\n".join(feed), encoding="utf-8")
 
 # -------------------- MAIN --------------------
 def main():
+    print("[diag] starting run…")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
+
     raw = fetch_items()
+    print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
     deduped = dedupe(raw)
+    print(f"[diag] total after dedupe: {len(deduped)}")
+
     notes = build_notes(deduped)
+    print(f"[diag] notes built: {len(notes)}")
+
+    # Load newsroom prompt (editable file)
     prompt_text = ""
     p = ROOT / "prompt.txt"
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
-    script = rewrite_with_openai(prompt_text, notes) or "Error generating script."
+
+    # Generate script
+    script = None
+    if prompt_text.strip() and notes:
+        script = rewrite_with_openai(prompt_text, notes)
+
+    # Fallback text if GPT failed/empty
+    if not script or len(script.split()) < 25:
+        script = ("Ooops, something went wrong. Sorry about that. "
+                  "Why don't you email Matt Karolian so I can fix it.")
+
+    # Sanitize for smoother TTS pacing
     script = sanitize_for_tts(script)
+
+    print("\n--- SCRIPT TO READ ---\n")
+    print(script.strip())
+    print("\n--- END SCRIPT ---\n")
+
+    # Output artifacts
     today = dt.datetime.now(ZoneInfo("America/New_York"))
     date_str = today.strftime("%Y-%m-%d")
+
     write_shownotes(date_str, deduped)
     write_index_if_missing()
-    mp3_bytes = tts_elevenlabs(script)
+
+    # TTS + feed
+    mp3_bytes = None
+    try:
+        mp3_bytes = tts_elevenlabs(script)
+    except Exception as ex:
+        print(f"[warn] ElevenLabs error: {ex}", file=sys.stderr)
+
     ep_url = ""
     filesize = 0
     ep_name = f"boston-briefing-{date_str}.mp3"
     ep_path = EP_DIR / ep_name
+
     if mp3_bytes:
         ep_path.write_bytes(mp3_bytes)
         filesize = len(mp3_bytes)
         ep_url = f"{PUBLIC_BASE_URL}/episodes/{ep_name}" if PUBLIC_BASE_URL else f"episodes/{ep_name}"
+        print(f"[diag] saved MP3: {ep_path} ({filesize} bytes)")
+    else:
+        print("[diag] MP3 not created; continuing with feed + site")
+
     build_feed(ep_url, filesize)
+    print("[diag] done.")
 
 if __name__ == "__main__":
     main()

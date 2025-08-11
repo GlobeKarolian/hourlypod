@@ -41,5 +41,5 @@ CLOSING:
   “That’s the Boston Briefing. This script was written by AI and voiced using an AI recreation of Matt Karolian’s voice. This is an internal beta — please do not share externally.”
 
 GREETING:
-- Begin with: “Good {morning/afternoon/evening}, it’s {Day of week}, {Month} {Day}, {Year}.”
+- Begin with: “Good {morning/afternoon/evening}, it’s {Day of week}, {Month} {Day}, {Year}.”, if its after 2am use morning, and then switch to afternon at 12pm, nd then evening at 5:30pm
 - Use Boston local time to determine the greeting.

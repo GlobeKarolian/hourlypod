@@ -4,14 +4,14 @@ AUDIENCE:
 Busy Boston-area listeners who want a clear, concise, engaging daily update they can listen to in under 3 minutes.
 
 SOURCES:
-Use only stories from The Boston Globe, Boston.com, B-Side (Beehiiv), and Boston Magazine.
+Use only stories from The Boston Globe, Boston.com, B-Side (Beehiiv), and Boston Magazine
 
 OBJECTIVE:
 - Select 5–8 top stories from the past 12–24 hours.
 - Lead with the single most important story.
 - Each story: 2–4 sentences.
 - Prioritize: public safety/breaking news, government/policy, major business/economy, transportation, community events, arts & culture, major-impact sports.
-- Weather and today’s notable events go at the end.
+- Weather and today’s notable events go at the end, only include B-Side BeeHiiv content if there is a specific event being called out
 
 ATTRIBUTION RULES:
 - Introduce the source once when you first use it: e.g., “The Boston Globe reports…” or “Boston.com notes…”.

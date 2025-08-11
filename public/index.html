@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Boston Briefing — Internal Beta</title>
+  <link rel="stylesheet" href="style.css" />
+  <meta name="robots" content="noindex,nofollow" />
+</head>
+<body>
+  <div class="beta">INTERNAL BETA / TEST — Do not share externally.</div>
+
+  <main class="wrap">
+    <header>
+      <h1>Boston Briefing</h1>
+      <p class="tag">AI-written script • AI recreation of Matt Karolian’s voice</p>
+    </header>
+
+    <section class="card">
+      <h2 id="now-title">Latest episode</h2>
+      <audio id="player" controls preload="none" style="width:100%"></audio>
+      <p class="small">
+        RSS: <a id="rss" target="_blank" rel="noopener">feed.xml</a>
+      </p>
+    </section>
+
+    <section class="card">
+      <h3>Past episodes</h3>
+      <ul id="episodes"></ul>
+    </section>
+  </main>
+
+  <script>
+    async function init() {
+      const rss = document.getElementById('rss');
+      rss.href = 'feed.xml';
+
+      try {
+        const res = await fetch('manifest.json', {cache:'no-store'});
+        if (!res.ok) throw new Error('no manifest');
+        const data = await res.json();
+        if (!Array.isArray(data) || data.length === 0) throw new Error('empty');
+
+        const latest = data[0];
+        document.getElementById('now-title').textContent = latest.title || 'Latest episode';
+        document.getElementById('player').src = latest.url || ('episodes/' + (latest.title || '').replace(/\s+/g,'-') + '.mp3');
+
+        const ul = document.getElementById('episodes');
+        data.slice(1).forEach(ep => {
+          const li = document.createElement('li');
+          const a = document.createElement('a');
+          a.href = ep.url;
+          a.textContent = ep.title || ep.date;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+      } catch (e) {
+        document.getElementById('now-title').textContent = 'Latest episode (pending)';
+      }
+    }
+    init();
+  </script>
+</body>
+</html>

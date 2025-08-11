@@ -1,5 +1,5 @@
 # main.py
-import os, sys, re, json, datetime as dt
+import os, sys, json, datetime as dt
 from pathlib import Path
 from email.utils import format_datetime
 from zoneinfo import ZoneInfo
@@ -17,8 +17,6 @@ OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 MAX_ITEMS       = int(os.getenv("MAX_ITEMS", "10"))
-TTS_MODE        = (os.getenv("TTS_MODE", "chunked") or "chunked").lower()  # "chunked" or "single"
-CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "900"))  # ~20–40s per chunk
 
 ROOT       = Path(".")
 PUBLIC_DIR = ROOT / "public"
@@ -128,6 +126,7 @@ def build_notes(items):
         if used >= MAX_ITEMS: break
         txt = extract_text(it["link"])
         if not txt:
+            # fall back to feed summary/title so we never end up empty
             txt = it.get("summary") or it["title"]
         sent = first_sentence(txt)
         if len(sent.split()) < 6:
@@ -145,11 +144,12 @@ except Exception as e:
     _client = None
 
 def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
+    """Responses for GPT-5 models, Chat for GPT-4o."""
     if not _client or not OPENAI_MODEL:
         print("[diag] OpenAI client/model missing")
         return None
 
-    _, tod, pretty_date = boston_now()
+    now, tod, pretty_date = boston_now()
     sys_preamble = (
         "HARD CONSTRAINTS:\n"
         f"- Opening line MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
@@ -159,7 +159,6 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
     )
     user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
-
     try:
         if OPENAI_MODEL.lower().startswith("gpt-5"):
             resp = _client.responses.create(
@@ -167,7 +166,15 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
                 max_output_tokens=1200,
             )
-            return (getattr(resp, "output_text", "") or "").strip()
+            txt = getattr(resp, "output_text", None)
+            if txt and len(txt.split()) > 25:
+                return txt.strip()
+            # retry w/o cap if needed
+            resp2 = _client.responses.create(
+                model=OPENAI_MODEL,
+                input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
+            )
+            return (getattr(resp2, "output_text", "") or "").strip()
         else:
             resp = _client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -181,151 +188,81 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[warn] OpenAI generation failed: {e}")
-        return None
-
-# -------------------- FALLBACK SCRIPT --------------------
-def fallback_script(notes: list[str]) -> str:
-    if not notes:
-        return ("I couldn't fetch stories just now. Check the feeds in feeds.yml "
-                "and try again in a few minutes.")
-    now, tod, pretty_date = boston_now()
-    lines = [f"Good {tod}, it’s {pretty_date}.", "Here’s what’s happening around Boston:"]
-    for n in notes[:6]:
-        spoken = n.split("(link:")[0].strip().rstrip(".")
-        lines.append(f"{spoken}.")
-    lines.append("That’s the Boston Briefing. This is an internal beta—please don’t share externally.")
-    return " ".join(lines)
+        try:
+            resp = _client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role":"system","content":sys_preamble},
+                    {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
+                ],
+                temperature=0.35,
+                max_tokens=1200,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e2:
+            print(f"[warn] OpenAI fallback failed: {e2}")
+            return None
 
 # -------------------- TTS SANITIZER --------------------
 def sanitize_for_tts(s: str) -> str:
-    rep = (("—", ", "), ("–", ", "), ("…", ". "), (" / ", " or "))
+    # Normalize punctuation & expand acronyms to reduce prosody “drag”
+    rep = (
+        ("—", ", "), ("–", ", "), ("…", ". "),
+        (" / ", " or "),
+    )
     for a,b in rep:
         s = s.replace(a,b)
+    # Expand a couple of Boston acronyms that get elongated
     s = s.replace("MBTA", "M-B-T-A").replace("BPL", "B-P-L")
+    # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- ElevenLabs config loader (single source: voice_settings.json) --------------------
-def _load_voice_settings_from_json():
-    cfg_path = ROOT / "voice_settings.json"
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        model_id = (data.get("model_id") or "eleven_multilingual_v2").strip()
-        vs = data.get("voice_settings") or {}
-        voice_settings = {
-            "stability": float(vs.get("stability", 0.80)),
-            "similarity_boost": float(vs.get("similarity_boost", 0.90)),
-            "style": float(vs.get("style", 0.15)),
-            "use_speaker_boost": bool(vs.get("use_speaker_boost", True)),
-            "voice_speed": float(vs.get("voice_speed", 1.00)),
-        }
-        return model_id, voice_settings
-    except Exception as e:
-        print(f"[warn] failed to read voice_settings.json, using defaults: {e}", file=sys.stderr)
-        return "eleven_multilingual_v2", {
-            "stability": 0.80,
-            "similarity_boost": 0.90,
-            "style": 0.15,
-            "use_speaker_boost": True,
-            "voice_speed": 1.00,
-        }
-
-# -------------------- TTS HELPERS (single + chunked) --------------------
-def tts_elevenlabs_single(text: str, model_id: str, vs: dict) -> bytes | None:
+# -------------------- ELEVENLABS (SINGLE CLEAN REQUEST) --------------------
+def tts_elevenlabs(text: str) -> bytes | None:
+    """
+    Single clean TTS request to ElevenLabs (non-streaming).
+    Uses top-level voice_speed and conservative 'news anchor' settings.
+    """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}?output_format=mp3_44100_128"
+    # Non-streaming endpoint; explicit output format; no streaming params
+    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+    url  = f"{base}?output_format=mp3_44100_128"
+
     payload = {
         "text": text,
-        "model_id": model_id,
+        "model_id": "eleven_multilingual_v2",  # steady, high-quality long-form
         "voice_settings": {
-            "stability": vs["stability"],
-            "similarity_boost": vs["similarity_boost"],
-            "style": vs["style"],
-            "use_speaker_boost": vs["use_speaker_boost"],
-            "voice_speed": vs.get("voice_speed", 1.00),
-        }
+            "stability": 0.80,        # consistent pacing
+            "similarity_boost": 0.90, # keep timbre close
+            "style": 0.15,            # low drama for news
+            "use_speaker_boost": True
+        },
+        # IMPORTANT: voice_speed at top-level (not inside voice_settings)
+        "voice_speed": 1.00
     }
+
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
-        "content-type": "application/json",
-        "connection": "close",
+        "content-type": "application/json"
     }
+
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=180)
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
+        print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
         return r.content
+    except requests.exceptions.Timeout:
+        print("[warn] ElevenLabs request timed out", file=sys.stderr)
+        return None
     except Exception as e:
         print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
         return None
-
-def split_into_chunks(script: str, max_chars: int = 900) -> list[str]:
-    """
-    Split on sentence boundaries; keep chunks under ~900 chars to avoid drift.
-    """
-    s = re.sub(r"\s+", " ", script).strip()
-    parts = re.split(r"(?<=[\.\?\!])\s+", s)
-    chunks, buf = [], ""
-    for p in parts:
-        piece = p.strip()
-        if not piece:
-            continue
-        if len(buf) + 1 + len(piece) <= max_chars:
-            buf = f"{buf} {piece}".strip()
-        else:
-            if buf:
-                chunks.append(buf)
-            buf = piece
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-def tts_elevenlabs_chunked(text: str) -> bytes | None:
-    """
-    Chunked TTS to avoid long-form prosody drift.
-    Concatenates MP3 chunks with identical codec settings.
-    """
-    if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
-        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
-        return None
-
-    model_id, vs = _load_voice_settings_from_json()
-    chunks = split_into_chunks(text, max_chars=CHUNK_MAX_CHARS)
-    print(f"[diag] TTS chunks: {len(chunks)}")
-
-    mp3_segments: list[bytes] = []
-    for i, c in enumerate(chunks, 1):
-        print(f"[diag] generating chunk {i}/{len(chunks)} ({len(c)} chars)")
-        audio = tts_elevenlabs_single(c, model_id, vs)
-        if not audio:
-            print(f"[warn] chunk {i} failed; aborting chunked TTS", file=sys.stderr)
-            return None
-        mp3_segments.append(audio)
-
-    final_mp3 = b"".join(mp3_segments)
-    print(f"[diag] concatenated MP3 size: {len(final_mp3)} bytes")
-    return final_mp3
-
-def tts_elevenlabs(text: str) -> bytes | None:
-    """
-    Prefer chunked synthesis for stable pacing; fall back to single-shot.
-    Toggle with env TTS_MODE=single to force single request.
-    """
-    if TTS_MODE == "single":
-        model_id, vs = _load_voice_settings_from_json()
-        return tts_elevenlabs_single(text, model_id, vs)
-
-    # default: chunked
-    audio = tts_elevenlabs_chunked(text)
-    if audio:
-        return audio
-    # fallback if chunked hit an API hiccup
-    model_id, vs = _load_voice_settings_from_json()
-    return tts_elevenlabs_single(text, model_id, vs)
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):
@@ -341,6 +278,7 @@ def write_shownotes(date_str, items):
     (SH_NOTES / f"{date_str}.html").write_text("\n".join(html), encoding="utf-8")
 
 def write_index_if_missing():
+    """Only scaffold if you haven't uploaded your own UI."""
     idx = PUBLIC_DIR / "index.html"
     if idx.exists():
         return
@@ -392,7 +330,7 @@ def build_feed(episode_url: str, filesize: int):
 # -------------------- MAIN --------------------
 def main():
     print("[diag] starting run…")
-    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS} TTS_MODE={TTS_MODE} CHUNK_MAX_CHARS={CHUNK_MAX_CHARS}")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
 
     raw = fetch_items()
     print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")
@@ -401,10 +339,6 @@ def main():
 
     notes = build_notes(deduped)
     print(f"[diag] notes built: {len(notes)}")
-    if deduped:
-        print("[diag] sample titles:")
-        for it in deduped[:5]:
-            print(" -", it["title"])
 
     # Load newsroom prompt (editable file)
     prompt_text = ""
@@ -412,14 +346,17 @@ def main():
     if p.exists():
         prompt_text = p.read_text(encoding="utf-8")
 
-    # Generate script via GPT, else fallback
+    # Generate script
     script = None
     if prompt_text.strip() and notes:
         script = rewrite_with_openai(prompt_text, notes)
-    if not script or len(script.split()) < 25:
-        script = fallback_script(notes)
 
-    # Light sanitize for smoother TTS pacing
+    # Fallback text if GPT failed/empty
+    if not script or len(script.split()) < 25:
+        script = ("Ooops, something went wrong. Sorry about that. "
+                  "Why don't you email Matt Karolian so I can fix it.")
+
+    # Sanitize for smoother TTS pacing
     script = sanitize_for_tts(script)
 
     print("\n--- SCRIPT TO READ ---\n")

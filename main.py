@@ -54,7 +54,7 @@ def load_voice_settings(config_path: str = "voice_settings.json") -> dict:
     Falls back to defaults if missing/invalid.
     """
     defaults = {
-        "model_id": "eleven_multilingual_v2",
+        "model_id": "eleven_v3",
         "voice_settings": {
             "stability": 0.80,
             "similarity_boost": 0.90,

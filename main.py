@@ -1,5 +1,5 @@
 # main.py
-import os, sys, json, datetime as dt
+import os, sys, re, json, datetime as dt
 from pathlib import Path
 from email.utils import format_datetime
 from zoneinfo import ZoneInfo
@@ -17,6 +17,8 @@ OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 MAX_ITEMS       = int(os.getenv("MAX_ITEMS", "10"))
+TTS_MODE        = (os.getenv("TTS_MODE", "chunked") or "chunked").lower()  # "chunked" or "single"
+CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "900"))  # ~20–40s per chunk
 
 ROOT       = Path(".")
 PUBLIC_DIR = ROOT / "public"
@@ -181,7 +183,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         print(f"[warn] OpenAI generation failed: {e}")
         return None
 
-# -------------------- FALLBACK SCRIPT (no more “Ooops”) --------------------
+# -------------------- FALLBACK SCRIPT --------------------
 def fallback_script(notes: list[str]) -> str:
     if not notes:
         return ("I couldn't fetch stories just now. Check the feeds in feeds.yml "
@@ -227,22 +229,13 @@ def _load_voice_settings_from_json():
             "voice_speed": 1.00,
         }
 
-# -------------------- ELEVENLABS (single clean request using JSON settings) --------------------
-def tts_elevenlabs(text: str) -> bytes | None:
-    """
-    Non-streaming HTTP request to ElevenLabs.
-    All tuning comes from voice_settings.json (single source of truth).
-    """
+# -------------------- TTS HELPERS (single + chunked) --------------------
+def tts_elevenlabs_single(text: str, model_id: str, vs: dict) -> bytes | None:
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    model_id, vs = _load_voice_settings_from_json()
-
-    # Non-streaming endpoint; no streaming params; explicit output format
-    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url  = f"{base}?output_format=mp3_44100_128"
-
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}?output_format=mp3_44100_128"
     payload = {
         "text": text,
         "model_id": model_id,
@@ -251,31 +244,88 @@ def tts_elevenlabs(text: str) -> bytes | None:
             "similarity_boost": vs["similarity_boost"],
             "style": vs["style"],
             "use_speaker_boost": vs["use_speaker_boost"],
-            # keep voice_speed inside voice_settings to keep one cohesive schema
-            "voice_speed": vs["voice_speed"],
+            "voice_speed": vs.get("voice_speed", 1.00),
         }
     }
-
     headers = {
         "xi-api-key": ELEVEN_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json",
         "connection": "close",
     }
-
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=180)
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
-        print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
         return r.content
-    except requests.exceptions.Timeout:
-        print("[warn] ElevenLabs request timed out", file=sys.stderr)
-        return None
     except Exception as e:
         print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
         return None
+
+def split_into_chunks(script: str, max_chars: int = 900) -> list[str]:
+    """
+    Split on sentence boundaries; keep chunks under ~900 chars to avoid drift.
+    """
+    s = re.sub(r"\s+", " ", script).strip()
+    parts = re.split(r"(?<=[\.\?\!])\s+", s)
+    chunks, buf = [], ""
+    for p in parts:
+        piece = p.strip()
+        if not piece:
+            continue
+        if len(buf) + 1 + len(piece) <= max_chars:
+            buf = f"{buf} {piece}".strip()
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = piece
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+def tts_elevenlabs_chunked(text: str) -> bytes | None:
+    """
+    Chunked TTS to avoid long-form prosody drift.
+    Concatenates MP3 chunks with identical codec settings.
+    """
+    if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
+        print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
+        return None
+
+    model_id, vs = _load_voice_settings_from_json()
+    chunks = split_into_chunks(text, max_chars=CHUNK_MAX_CHARS)
+    print(f"[diag] TTS chunks: {len(chunks)}")
+
+    mp3_segments: list[bytes] = []
+    for i, c in enumerate(chunks, 1):
+        print(f"[diag] generating chunk {i}/{len(chunks)} ({len(c)} chars)")
+        audio = tts_elevenlabs_single(c, model_id, vs)
+        if not audio:
+            print(f"[warn] chunk {i} failed; aborting chunked TTS", file=sys.stderr)
+            return None
+        mp3_segments.append(audio)
+
+    final_mp3 = b"".join(mp3_segments)
+    print(f"[diag] concatenated MP3 size: {len(final_mp3)} bytes")
+    return final_mp3
+
+def tts_elevenlabs(text: str) -> bytes | None:
+    """
+    Prefer chunked synthesis for stable pacing; fall back to single-shot.
+    Toggle with env TTS_MODE=single to force single request.
+    """
+    if TTS_MODE == "single":
+        model_id, vs = _load_voice_settings_from_json()
+        return tts_elevenlabs_single(text, model_id, vs)
+
+    # default: chunked
+    audio = tts_elevenlabs_chunked(text)
+    if audio:
+        return audio
+    # fallback if chunked hit an API hiccup
+    model_id, vs = _load_voice_settings_from_json()
+    return tts_elevenlabs_single(text, model_id, vs)
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):
@@ -342,7 +392,7 @@ def build_feed(episode_url: str, filesize: int):
 # -------------------- MAIN --------------------
 def main():
     print("[diag] starting run…")
-    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
+    print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS} TTS_MODE={TTS_MODE} CHUNK_MAX_CHARS={CHUNK_MAX_CHARS}")
 
     raw = fetch_items()
     print(f"[diag] fetched from {len(SOURCES)} source(s); total entries={len(raw)}")

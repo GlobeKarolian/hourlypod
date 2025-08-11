@@ -4,9 +4,3 @@ exclude_keywords: []
 sources:
   - name: Boston.com
     rss: https://www.boston.com/feed/bdc-msn-rss
-
-  - name: The Boston Globe
-    rss: https://www.bostonglobe.com/arc/outboundfeeds/feedly/?outputType=xml
-
-  - name: The Boston Globe 
-    rss: https://www.bostonglobe.com/metro/?outputType=rss

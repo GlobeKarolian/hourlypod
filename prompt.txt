@@ -4,7 +4,7 @@ AUDIENCE:
 Busy Boston-area listeners who want a clear, concise, engaging daily update they can listen to in under 3 minutes.
 
 SOURCES:
-Use only stories from The Boston Globe, Boston.com, B-Side (Beehiiv), and Boston Magazine.
+Use only stories from Boston.com
 
 OBJECTIVE:
 - Select 5–8 top stories from the past 12–24 hours.

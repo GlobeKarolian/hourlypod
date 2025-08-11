@@ -216,7 +216,7 @@ def rewrite_script(prompt_text: str, notes: list[str]) -> str | None:
             resp = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{control}\n\nUSER PROMPT:\n{prompt_text.strip()}\n\n{user_block}",
-                max_output_tokens=1400,
+                max_completion_tokens=1400,
             )
             text = (getattr(resp, "output_text", None) or "").strip()
             if text:

@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: 🚀 Ultra Premium Build & Deploy
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Extended timeout for premium processing
     steps:
       - uses: actions/checkout@v4
       
@@ -22,15 +23,12 @@ jobs:
         with:
           python-version: "3.11"
           
-      - name: Install system dependencies
+      - name: 📦 Install Python dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          pip install --upgrade pip
+          pip install -r requirements.txt
           
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
-        
-      - name: Build episode
+      - name: 🎙️ Generate Premium Episode
         env:
           PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
           OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
@@ -38,9 +36,15 @@ jobs:
           ELEVEN_API_KEY:  ${{ secrets.ELEVEN_API_KEY }}
           ELEVEN_VOICE_ID: ${{ secrets.ELEVEN_VOICE_ID }}
           MAX_ITEMS: "8"
-        run: python main.py
-        
-      - name: Upload static site
+          # Premium generation flags
+          PREMIUM_MODE: "true"
+          QUALITY_LEVEL: "ultra"
+        run: |
+          echo "🚀 Starting ultra premium generation..."
+          python main.py
+          echo "✨ Premium generation complete!"
+          
+      - name: 📤 Upload Premium Site
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
@@ -56,4 +60,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - id: deployment
+        name: 🌐 Deploy Premium Site
         uses: actions/deploy-pages@v4

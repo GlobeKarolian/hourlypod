@@ -155,7 +155,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         f"- Opening line MUST be: 'Good {tod}, it's {pretty_date}.'\n"
         "- Lead with the most important local news; do not lead with sports unless it's clearly the top story.\n"
         "- Absolutely no editorializing, sympathy, or sentiment.\n"
-        "- Attribute sources naturally in-line (The Boston Globe, Boston.com, B-Side).\n"
+        "- Attribute sources naturally in-line (The Boston Globe, Boston.com).\n"
         "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
     )
     user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
@@ -217,28 +217,35 @@ def sanitize_for_tts(s: str) -> str:
     # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- NATURAL TTS (NO CHUNKING) --------------------
+# -------------------- PREMIUM CADILLAC TTS --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    Natural-sounding TTS with optimized settings for human-like news reading.
+    Premium "Cadillac" TTS settings for maximum quality - cost is no object.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url = f"{base}?output_format=mp3_44100_128"
+    # Use highest quality output format
+    url = f"{base}?output_format=mp3_44100_192&optimize_streaming_latency=0"
 
     payload = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",  # More natural than turbo
+        "model_id": "eleven_multilingual_v2",  # Premium model for cloned voices
         "voice_settings": {
-            "stability": 0.75,        # Lower for natural variation
-            "similarity_boost": 0.85, # Keep voice character
-            "style": 0.25,            # Higher for personality/natural speech
-            "use_speaker_boost": True
-        }
-        # No voice_speed - this was causing the original slowdown issue
+            "stability": 0.71,        # Sweet spot for natural variation
+            "similarity_boost": 0.95, # Maximum voice fidelity  
+            "style": 0.30,            # Rich personality and inflection
+            "use_speaker_boost": True # Essential for cloned voices
+        },
+        # Premium generation settings
+        "pronunciation_dictionary_locators": [],
+        "seed": None,  # Allow natural variation
+        "previous_text": None,
+        "next_text": None,
+        "previous_request_ids": [],
+        "next_request_ids": []
     }
 
     headers = {
@@ -248,17 +255,18 @@ def tts_elevenlabs(text: str) -> bytes | None:
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=180)
+        # Longer timeout for premium processing
+        r = requests.post(url, headers=headers, json=payload, timeout=300)
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
-        print(f"[diag] ElevenLabs natural success: {len(r.content)} bytes")
+        print(f"[diag] ElevenLabs PREMIUM success: {len(r.content)} bytes")
         return r.content
     except requests.exceptions.Timeout:
-        print("[warn] ElevenLabs request timed out", file=sys.stderr)
+        print("[warn] ElevenLabs premium request timed out", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
+        print(f"[warn] ElevenLabs premium request failed: {e}", file=sys.stderr)
         return None
 
 # -------------------- OUTPUT (SITE/FEED) --------------------

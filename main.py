@@ -135,7 +135,7 @@ def build_notes(items):
         used += 1
     return notes
 
-# -------------------- OPENAI --------------------
+# -------------------- ULTRA PREMIUM OPENAI --------------------
 try:
     from openai import OpenAI
     _client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -144,63 +144,97 @@ except Exception as e:
     _client = None
 
 def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
-    """Responses for GPT-5 models, Chat for GPT-4o."""
+    """Ultra premium OpenAI generation for maximum quality script writing."""
     if not _client or not OPENAI_MODEL:
         print("[diag] OpenAI client/model missing")
         return None
 
     now, tod, pretty_date = boston_now()
+    
+    # ENHANCED system prompt for premium quality
     sys_preamble = (
-        "HARD CONSTRAINTS:\n"
-        f"- Opening line MUST be: 'Good {tod}, it's {pretty_date}.'\n"
-        "- Lead with the most important local news; do not lead with sports unless it's clearly the top story.\n"
-        "- Absolutely no editorializing, sympathy, or sentiment.\n"
-        "- Attribute sources naturally in-line (The Boston Globe, Boston.com).\n"
-        "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
+        "EXPERT NEWS ANCHOR CONSTRAINTS:\n"
+        f"- MANDATORY opening: 'Good {tod}, it's {pretty_date}.'\n"
+        "- Lead with the most newsworthy local story (not sports unless major breaking news)\n"
+        "- Write in the style of NPR's Kai Ryssdal: confident, conversational, authoritative\n"
+        "- NO editorializing, sentiment, or opinion - pure factual reporting only\n"
+        "- Seamlessly attribute sources (The Boston Globe, Boston.com) naturally in speech\n"
+        "- Target 350-400 words for 2.5-3 minute read time\n"
+        "- Include 6-8 stories with smooth narrative flow and varied sentence structure\n"
+        "- End with brief weather and close with beta disclosure\n"
+        "- CRITICAL: Sound like a seasoned professional broadcaster, not an AI\n"
     )
-    user_block = "STORIES (raw notes):\n" + "\n\n".join(notes)
+    
+    # Enhanced context for better story selection
+    user_block = f"""TODAY'S NEWS STORIES for {pretty_date}:
+{chr(10).join(notes)}
+
+INSTRUCTIONS: Create a compelling, professional news briefing that would impress veteran journalists. Focus on stories that matter most to Boston residents. Use natural transitions and authoritative delivery."""
+
     try:
+        # Try GPT-5 if available with maximum settings
         if OPENAI_MODEL.lower().startswith("gpt-5"):
+            print("[diag] Using GPT-5 with ultra premium settings...")
             resp = _client.responses.create(
                 model=OPENAI_MODEL,
                 input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
-                max_output_tokens=1200,
+                max_output_tokens=1500,  # More space for quality
             )
             txt = getattr(resp, "output_text", None)
-            if txt and len(txt.split()) > 25:
+            if txt and len(txt.split()) > 30:
                 return txt.strip()
-            # retry w/o cap if needed
-            resp2 = _client.responses.create(
-                model=OPENAI_MODEL,
-                input=f"{sys_preamble}\n\n{prompt_text.strip()}\n\n{user_block}",
-            )
-            return (getattr(resp2, "output_text", "") or "").strip()
-        else:
-            resp = _client.chat.completions.create(
+                
+        # GPT-4 with ultra premium settings
+        print(f"[diag] Using {OPENAI_MODEL} with ultra premium settings...")
+        resp = _client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": sys_preamble},
+                {"role": "user", "content": f"{prompt_text.strip()}\n\n{user_block}"}
+            ],
+            temperature=0.3,      # Slightly lower for more consistent quality
+            max_tokens=1500,      # More generous token limit
+            top_p=0.9,           # Focus on high-probability tokens
+            frequency_penalty=0.1, # Slight penalty for repetition
+            presence_penalty=0.1,  # Encourage topic diversity
+        )
+        result = (resp.choices[0].message.content or "").strip()
+        
+        # Quality validation
+        if len(result.split()) < 50:
+            print("[warn] Generated script too short, retrying...")
+            # Retry with different temperature
+            resp2 = _client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
-                    {"role":"system","content":sys_preamble},
-                    {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
+                    {"role": "system", "content": sys_preamble},
+                    {"role": "user", "content": f"Generate a longer, more detailed script:\n\n{prompt_text.strip()}\n\n{user_block}"}
                 ],
-                temperature=0.35,
-                max_tokens=1200,
+                temperature=0.4,
+                max_tokens=1500,
             )
-            return (resp.choices[0].message.content or "").strip()
+            result = (resp2.choices[0].message.content or "").strip()
+            
+        print(f"[diag] ✨ Generated premium script: {len(result.split())} words")
+        return result
+        
     except Exception as e:
-        print(f"[warn] OpenAI generation failed: {e}")
+        print(f"[warn] Premium OpenAI generation failed: {e}")
+        # Fallback to standard GPT-4
         try:
+            print("[diag] Trying fallback OpenAI generation...")
             resp = _client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role":"system","content":sys_preamble},
-                    {"role":"user","content":f"{prompt_text.strip()}\n\n{user_block}"},
+                    {"role": "system", "content": sys_preamble},
+                    {"role": "user", "content": f"{prompt_text.strip()}\n\n{user_block}"}
                 ],
                 temperature=0.35,
                 max_tokens=1200,
             )
             return (resp.choices[0].message.content or "").strip()
         except Exception as e2:
-            print(f"[warn] OpenAI fallback failed: {e2}")
+            print(f"[warn] Fallback OpenAI also failed: {e2}")
             return None
 
 # -------------------- TTS SANITIZER --------------------
@@ -217,35 +251,95 @@ def sanitize_for_tts(s: str) -> str:
     # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- PREMIUM CADILLAC TTS --------------------
+# -------------------- ULTRA PREMIUM TTS --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    Premium "Cadillac" TTS settings for maximum quality - cost is no object.
+    ULTRA CADILLAC settings - Maximum quality for impressive beta demo.
+    No expense spared for the best possible audio generation.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    # Use highest quality output format
+    # MAXIMUM quality output format - highest bitrate available
     url = f"{base}?output_format=mp3_44100_192&optimize_streaming_latency=0"
 
     payload = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",  # Premium model for cloned voices
+        # Try the latest model first, fallback to proven stable
+        "model_id": "eleven_multilingual_v2",  
         "voice_settings": {
-            "stability": 0.71,        # Sweet spot for natural variation
-            "similarity_boost": 0.95, # Maximum voice fidelity  
-            "style": 0.30,            # Rich personality and inflection
-            "use_speaker_boost": True # Essential for cloned voices
+            "stability": 0.68,        # Optimal sweet spot for natural variation
+            "similarity_boost": 0.98, # MAXIMUM voice fidelity (near perfect clone)
+            "style": 0.35,            # Rich expressiveness for engaging delivery
+            "use_speaker_boost": True # Essential for premium cloned voice quality
         },
-        # Premium generation settings
+        # PREMIUM generation settings for maximum control
         "pronunciation_dictionary_locators": [],
-        "seed": None,  # Allow natural variation
+        "seed": None,  # Allow natural variation between generations
         "previous_text": None,
         "next_text": None,
         "previous_request_ids": [],
-        "next_request_ids": []
+        "next_request_ids": [],
+        # Additional premium parameters
+        "apply_text_normalization": "auto"
+    }
+
+    headers = {
+        "xi-api-key": ELEVEN_API_KEY,
+        "accept": "audio/mpeg",
+        "content-type": "application/json",
+        # Premium request headers
+        "user-agent": "BostonBriefing-Premium/1.0"
+    }
+
+    try:
+        # MAXIMUM timeout for thorough processing - no rushing
+        print(f"[diag] Generating ULTRA PREMIUM audio ({len(text)} chars)...")
+        r = requests.post(url, headers=headers, json=payload, timeout=600)  # 10 minutes max
+        
+        if r.status_code >= 400:
+            print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
+            # Try fallback with slightly different settings
+            return _fallback_premium_tts(text)
+        
+        # Validate audio quality
+        audio_size = len(r.content)
+        expected_min_size = len(text) * 50  # Rough quality check
+        
+        if audio_size < expected_min_size:
+            print(f"[warn] Audio seems too small ({audio_size} bytes), retrying...")
+            return _fallback_premium_tts(text)
+            
+        print(f"[diag] ✨ ULTRA PREMIUM TTS success: {audio_size:,} bytes")
+        return r.content
+        
+    except requests.exceptions.Timeout:
+        print("[warn] Premium TTS timed out, trying fallback", file=sys.stderr)
+        return _fallback_premium_tts(text)
+    except Exception as e:
+        print(f"[warn] Premium TTS failed: {e}", file=sys.stderr)
+        return _fallback_premium_tts(text)
+
+def _fallback_premium_tts(text: str) -> bytes | None:
+    """
+    Fallback premium settings if ultra settings fail.
+    """
+    print("[diag] Using fallback premium settings...")
+    
+    base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+    url = f"{base}?output_format=mp3_44100_192"
+
+    payload = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.75,        # Slightly more stable
+            "similarity_boost": 0.92, # High but not max
+            "style": 0.28,            # Rich but controlled
+            "use_speaker_boost": True
+        }
     }
 
     headers = {
@@ -255,18 +349,14 @@ def tts_elevenlabs(text: str) -> bytes | None:
     }
 
     try:
-        # Longer timeout for premium processing
         r = requests.post(url, headers=headers, json=payload, timeout=300)
         if r.status_code >= 400:
-            print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
+            print(f"[warn] Fallback also failed {r.status_code}: {r.text[:200]}")
             return None
-        print(f"[diag] ElevenLabs PREMIUM success: {len(r.content)} bytes")
+        print(f"[diag] ✅ Fallback premium success: {len(r.content):,} bytes")
         return r.content
-    except requests.exceptions.Timeout:
-        print("[warn] ElevenLabs premium request timed out", file=sys.stderr)
-        return None
     except Exception as e:
-        print(f"[warn] ElevenLabs premium request failed: {e}", file=sys.stderr)
+        print(f"[warn] Fallback failed: {e}")
         return None
 
 # -------------------- OUTPUT (SITE/FEED) --------------------

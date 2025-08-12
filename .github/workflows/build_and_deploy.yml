@@ -4,19 +4,32 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
+          
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+        
       - name: Build episode
         env:
           PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
@@ -24,7 +37,9 @@ jobs:
           OPENAI_MODEL:    ${{ secrets.OPENAI_MODEL }}
           ELEVEN_API_KEY:  ${{ secrets.ELEVEN_API_KEY }}
           ELEVEN_VOICE_ID: ${{ secrets.ELEVEN_VOICE_ID }}
+          MAX_ITEMS: "8"
         run: python main.py
+        
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:

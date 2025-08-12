@@ -221,20 +221,19 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     
     # Enhanced system prompt for better output
     sys_preamble = (
-        "You are writing a news briefing script for audio delivery with ENERGY and PERSONALITY.\n"
-        "Think Bill Burr reading the news - conversational, slightly edgy, like telling stories to a friend.\n\n"
+        "You are writing a professional news briefing script for audio delivery.\n\n"
         "CRITICAL REQUIREMENTS:\n"
         f"1. Opening MUST be exactly: 'Good {tod}, it's {pretty_date}.'\n"
         "2. Write 300-450 words total (2-3 minute read time).\n"
-        "3. Include 5-8 stories, 2-4 sentences each. Mix short punchy sentences with longer ones.\n"
+        "3. Include 5-8 stories, 2-4 sentences each.\n"
         "4. Lead with the most impactful LOCAL news story.\n"
-        "5. TRANSITIONS: Use conversational transitions like 'Alright, meanwhile,' or 'So get this,'. "
-        "NEVER say stories are 'related' unless they actually are. Keep it natural and punchy.\n"
+        "5. Use smooth, logical transitions. NEVER say stories are 'related' unless "
+        "they actually are. Default to 'Meanwhile,' 'In other news,' or 'Turning to [topic].'\n"
         "6. Natural attribution: mention source once, then continue without repeating.\n"
-        "7. Conversational tone with energy - contractions are good, informal language is fine.\n"
+        "7. Professional broadcast tone - confident and conversational.\n"
         "8. End with brief weather and the required beta disclaimer.\n"
-        "9. You can react to absurd situations but keep it brief. No extended commentary.\n"
-        "10. Write for AUDIO - this should sound like someone actually talking, not reading.\n"
+        "9. NO editorializing, sympathy expressions, or personal commentary.\n"
+        "10. Write for AUDIO - use natural speech patterns and rhythm.\n"
     )
     
     user_block = (
@@ -339,7 +338,7 @@ def sanitize_for_tts(s: str) -> str:
 # -------------------- OPTIMIZED TTS --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    BILL BURR STYLE TTS - High energy, expressive delivery with attitude
+    OPTIMIZED TTS - Natural speech for professional news delivery
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
@@ -354,9 +353,9 @@ def tts_elevenlabs(text: str) -> bytes | None:
         "text": text,
         "model_id": "eleven_multilingual_v2",  # Best for cloned voices
         "voice_settings": {
-            "stability": 0.55,           # Much lower for dynamic, punchy delivery (was 0.70)
-            "similarity_boost": 0.75,    # Lower to allow more range and personality (was 0.85)
-            "style": 0.65,               # Very high for maximum expression and attitude (was 0.35)
+            "stability": 0.80,           # Good stability for clear delivery
+            "similarity_boost": 0.90,    # High similarity for voice accuracy
+            "style": 0.20,               # Moderate style for professional tone
             "use_speaker_boost": True    # Essential for cloned voices
         }
     }
@@ -502,7 +501,7 @@ def build_feed(episode_url: str, filesize: int):
         '    <language>en-us</language>',
         f'    <description>{desc}</description>',
         '    <itunes:author>Boston Briefing</itunes:author>',
-        '    <itunes:summary>AI-powered daily Boston news updates. Written by AI, voiced by AI text-to-speech.</itunes:summary>',
+        '    <itunes:summary>AI-powered daily Boston news updates. Written by GPT, voiced by an AI clone.</itunes:summary>',
         '    <itunes:category text="News">',
         '      <itunes:category text="Daily News"/>',
         '    </itunes:category>',

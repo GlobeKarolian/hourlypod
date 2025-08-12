@@ -15,5 +15,5 @@ sources:
   - name: The Boston Globe Business
     rss: https://www.bostonglobe.com/business/?outputType=rss
 
-    - name: The Boston Globe Arts
+  - name: The Boston Globe Arts
     rss: https://www.bostonglobe.com/arts/?outputType=rss

@@ -221,20 +221,20 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     
     # Enhanced system prompt for better output
     sys_preamble = (
-        "You are writing a professional news briefing script for audio delivery.\n\n"
+        "You are writing a news briefing script for audio delivery with ENERGY and PERSONALITY.\n"
+        "Think Bill Burr reading the news - conversational, slightly edgy, like telling stories to a friend.\n\n"
         "CRITICAL REQUIREMENTS:\n"
         f"1. Opening MUST be exactly: 'Good {tod}, it's {pretty_date}.'\n"
         "2. Write 300-450 words total (2-3 minute read time).\n"
-        "3. Include 5-8 stories, 2-4 sentences each.\n"
+        "3. Include 5-8 stories, 2-4 sentences each. Mix short punchy sentences with longer ones.\n"
         "4. Lead with the most impactful LOCAL news story.\n"
-        "5. TRANSITIONS: Use simple, logical transitions. NEVER say stories are 'related' unless "
-        "they actually are. Default to 'Meanwhile,' 'In other news,' or 'Turning to [topic],' "
-        "for unrelated stories. Better to use no transition than a false connection.\n"
+        "5. TRANSITIONS: Use conversational transitions like 'Alright, meanwhile,' or 'So get this,'. "
+        "NEVER say stories are 'related' unless they actually are. Keep it natural and punchy.\n"
         "6. Natural attribution: mention source once, then continue without repeating.\n"
-        "7. Professional broadcast tone - confident and conversational.\n"
+        "7. Conversational tone with energy - contractions are good, informal language is fine.\n"
         "8. End with brief weather and the required beta disclaimer.\n"
-        "9. NO editorializing, sympathy expressions, or personal commentary.\n"
-        "10. Write for AUDIO - use natural speech patterns and rhythm.\n"
+        "9. You can react to absurd situations but keep it brief. No extended commentary.\n"
+        "10. Write for AUDIO - this should sound like someone actually talking, not reading.\n"
     )
     
     user_block = (

@@ -112,9 +112,9 @@ def dedupe(items, threshold=85):
 # -------------------- EXTRACTION --------------------
 def extract_text(url: str) -> str:
     """Enhanced text extraction with better fallbacks"""
-    # 1) trafilatura first (best for news)
+    # 1) trafilatura first (best for news) - FIXED: removed timeout parameter
     try:
-        downloaded = trafilatura.fetch_url(url, timeout=20)
+        downloaded = trafilatura.fetch_url(url)  # Removed timeout parameter
         if downloaded:
             extracted = trafilatura.extract(
                 downloaded, 
@@ -252,9 +252,9 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         resp = _client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
-            temperature=0.3,  # Lower for more consistent output
-            max_completion_tokens=1200,  # Fixed: was max_tokens
-            presence_penalty=0.3,  # Reduce repetition
+            # temperature=0.3,  # REMOVED - not supported by some models
+            max_completion_tokens=1200,
+            presence_penalty=0.3,
             frequency_penalty=0.3
         )
         
@@ -275,8 +275,8 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             resp = _client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                temperature=0.3,
-                max_completion_tokens=1200  # Fixed: was max_tokens
+                # temperature=0.3,  # REMOVED - not supported
+                max_completion_tokens=1200
             )
             script = (resp.choices[0].message.content or "").strip()
             if script and len(script.split()) > 50:
@@ -391,7 +391,11 @@ def tts_elevenlabs(text: str) -> bytes | None:
         expected_max = 500000  # ~50 seconds maximum
         
         if audio_size < expected_min:
-            print(f"[warn] Audio suspiciously small ({audio_size} bytes)")
+            print(f"[warn] Audio suspiciously small ({audio_size} bytes) - likely an error response")
+            # Check if it's an error response
+            if audio_size < 1000:
+                print("[error] TTS failed - response too small to be valid audio")
+                return None
         elif audio_size > expected_max:
             print(f"[warn] Audio suspiciously large ({audio_size} bytes)")
             

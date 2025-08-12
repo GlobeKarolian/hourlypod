@@ -338,7 +338,7 @@ def sanitize_for_tts(s: str) -> str:
 # -------------------- OPTIMIZED TTS --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    OPTIMIZED TTS - Conservative settings specifically for CLONED voices
+    OPTIMIZED TTS - Maximum safe expression for cloned voices
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
@@ -353,9 +353,9 @@ def tts_elevenlabs(text: str) -> bytes | None:
         "text": text,
         "model_id": "eleven_multilingual_v2",  # Best for cloned voices
         "voice_settings": {
-            "stability": 0.90,           # VERY HIGH for cloned voices (was 0.80)
-            "similarity_boost": 0.95,    # MAXIMUM similarity for stability (was 0.90)
-            "style": 0.0,                # ZERO style for cloned voices (was 0.20)
+            "stability": 0.80,           # Maximum safe expression level
+            "similarity_boost": 0.90,    # High similarity for voice accuracy
+            "style": 0.10,               # Small amount of style for naturalness
             "use_speaker_boost": True    # Essential for cloned voices
         }
     }

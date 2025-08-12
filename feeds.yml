@@ -1,5 +1,9 @@
-daily_limit_per_source: 6
-exclude_keywords: []
+daily_limit_per_source: 8  # Increased for more story options
+exclude_keywords: 
+  - "horoscope"
+  - "lottery" 
+  - "obituary"
+  - "weather forecast"  # We handle weather separately
 
 sources:
   - name: Boston.com
@@ -7,3 +11,6 @@ sources:
 
   - name: The Boston Globe
     rss: https://www.bostonglobe.com/metro/?outputType=rss
+
+  - name: The Boston Globe Business
+    rss: https://www.bostonglobe.com/business/?outputType=rss

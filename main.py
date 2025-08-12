@@ -252,7 +252,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             model=OPENAI_MODEL,
             messages=messages,
             temperature=0.3,  # Lower for more consistent output
-            max_tokens=1200,
+            max_completion_tokens=1200,  # Fixed: was max_tokens
             presence_penalty=0.3,  # Reduce repetition
             frequency_penalty=0.3
         )
@@ -268,6 +268,20 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
             
     except Exception as e:
         print(f"[warn] OpenAI generation failed: {e}", file=sys.stderr)
+        # Try fallback with gpt-4o-mini
+        try:
+            print("[diag] trying fallback with gpt-4o-mini...")
+            resp = _client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.3,
+                max_completion_tokens=1200  # Fixed: was max_tokens
+            )
+            script = (resp.choices[0].message.content or "").strip()
+            if script and len(script.split()) > 50:
+                return script
+        except Exception as e2:
+            print(f"[warn] Fallback also failed: {e2}", file=sys.stderr)
         return None
 
 # -------------------- TTS SANITIZER --------------------

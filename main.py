@@ -227,7 +227,9 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
         "2. Write 300-450 words total (2-3 minute read time).\n"
         "3. Include 5-8 stories, 2-4 sentences each.\n"
         "4. Lead with the most impactful LOCAL news story.\n"
-        "5. Use smooth, varied transitions between stories.\n"
+        "5. TRANSITIONS: Use simple, logical transitions. NEVER say stories are 'related' unless "
+        "they actually are. Default to 'Meanwhile,' 'In other news,' or 'Turning to [topic],' "
+        "for unrelated stories. Better to use no transition than a false connection.\n"
         "6. Natural attribution: mention source once, then continue without repeating.\n"
         "7. Professional broadcast tone - confident and conversational.\n"
         "8. End with brief weather and the required beta disclaimer.\n"
@@ -337,7 +339,7 @@ def sanitize_for_tts(s: str) -> str:
 # -------------------- OPTIMIZED TTS --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    EXPRESSIVE TTS - More engaging news delivery with personality
+    BILL BURR STYLE TTS - High energy, expressive delivery with attitude
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
@@ -352,9 +354,9 @@ def tts_elevenlabs(text: str) -> bytes | None:
         "text": text,
         "model_id": "eleven_multilingual_v2",  # Best for cloned voices
         "voice_settings": {
-            "stability": 0.70,           # Lower for more dynamic expression (was 0.85)
-            "similarity_boost": 0.85,    # Slightly lower to allow more personality (was 0.90)
-            "style": 0.35,               # Much higher for expressive delivery (was 0.10)
+            "stability": 0.55,           # Much lower for dynamic, punchy delivery (was 0.70)
+            "similarity_boost": 0.75,    # Lower to allow more range and personality (was 0.85)
+            "style": 0.65,               # Very high for maximum expression and attitude (was 0.35)
             "use_speaker_boost": True    # Essential for cloned voices
         }
     }
@@ -500,7 +502,7 @@ def build_feed(episode_url: str, filesize: int):
         '    <language>en-us</language>',
         f'    <description>{desc}</description>',
         '    <itunes:author>Boston Briefing</itunes:author>',
-        '    <itunes:summary>AI-powered daily Boston news updates. Written by GPT, voiced by an AI clone.</itunes:summary>',
+        '    <itunes:summary>AI-powered daily Boston news updates. Written by AI, voiced by AI text-to-speech.</itunes:summary>',
         '    <itunes:category text="News">',
         '      <itunes:category text="Daily News"/>',
         '    </itunes:category>',

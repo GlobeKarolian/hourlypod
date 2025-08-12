@@ -1,4 +1,4 @@
-# main.py - ROCK SOLID RELIABLE VERSION
+# main.py - ULTRA BASIC TTS (No Slowdown/Struggling)
 import os, sys, json, datetime as dt
 from pathlib import Path
 from email.utils import format_datetime
@@ -144,7 +144,7 @@ except Exception as e:
     _client = None
 
 def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
-    """Reliable OpenAI generation with proven settings."""
+    """Basic OpenAI generation."""
     if not _client or not OPENAI_MODEL:
         print("[diag] OpenAI client/model missing")
         return None
@@ -217,31 +217,29 @@ def sanitize_for_tts(s: str) -> str:
     # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- ROCK SOLID TTS --------------------
+# -------------------- ULTRA BASIC TTS (NO SLOWDOWN) --------------------
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    ROCK SOLID TTS - Proven reliable settings that actually work.
-    No fancy features, no complex processing, just consistent results.
+    ULTRA BASIC TTS - Minimal settings to prevent slowdown/struggling.
+    Prioritizes speed and reliability over quality.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url = f"{base}?output_format=mp3_44100_128"  # Standard reliable quality
+    url = f"{base}?output_format=mp3_44100_128"
 
     payload = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",  # Proven stable model
+        "model_id": "eleven_multilingual_v2",
         "voice_settings": {
-            "stability": 0.75,        # Good balance of consistency and naturalness
-            "similarity_boost": 0.85, # Strong voice match without artifacts
-            "style": 0.25,            # Some personality but not excessive
-            "use_speaker_boost": True # Essential for cloned voices
+            "stability": 0.5,         # MUCH LOWER - less processing strain
+            "similarity_boost": 0.75, # LOWER - easier processing
+            "style": 0.0,             # ZERO - absolutely no style processing
+            "use_speaker_boost": True
         }
-        # CRITICAL: NO voice_speed parameter - this was causing all the problems!
-        # NO chunking, NO concatenation, NO complex fallbacks
-        # Just one simple, reliable request
+        # NO voice_speed, NO extra parameters, NOTHING fancy
     }
 
     headers = {
@@ -251,11 +249,11 @@ def tts_elevenlabs(text: str) -> bytes | None:
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=180)
+        r = requests.post(url, headers=headers, json=payload, timeout=120)  # Shorter timeout
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
-        print(f"[diag] ✅ Rock solid TTS success: {len(r.content):,} bytes")
+        print(f"[diag] ✅ Ultra basic TTS (no slowdown): {len(r.content):,} bytes")
         return r.content
     except requests.exceptions.Timeout:
         print("[warn] ElevenLabs request timed out", file=sys.stderr)
@@ -329,7 +327,7 @@ def build_feed(episode_url: str, filesize: int):
 
 # -------------------- MAIN --------------------
 def main():
-    print("[diag] starting run…")
+    print("[diag] starting ULTRA BASIC run (no slowdown)…")
     print(f"[diag] env: PUBLIC_BASE_URL=*** OPENAI_MODEL={OPENAI_MODEL} MAX_ITEMS={MAX_ITEMS}")
 
     raw = fetch_items()
@@ -391,7 +389,7 @@ def main():
         print("[diag] MP3 not created; continuing with feed + site")
 
     build_feed(ep_url, filesize)
-    print("[diag] done.")
+    print("[diag] ULTRA BASIC complete - should have no slowdown!")
 
 if __name__ == "__main__":
     main()

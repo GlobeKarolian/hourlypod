@@ -3,6 +3,7 @@ import os, sys, json, datetime as dt
 from pathlib import Path
 from email.utils import format_datetime
 from zoneinfo import ZoneInfo
+import re, io
 
 import yaml, feedparser, requests
 from bs4 import BeautifulSoup
@@ -46,7 +47,7 @@ def boston_now():
         tod = "afternoon"
     else:
         tod = "evening"
-    # “Monday, August 11, 2025” without %-d for Windows
+    # "Monday, August 11, 2025" without %-d for Windows
     pretty_date = now.strftime("%A, %B ") + str(int(now.strftime("%d"))) + now.strftime(", %Y")
     return now, tod, pretty_date
 
@@ -152,8 +153,8 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
     now, tod, pretty_date = boston_now()
     sys_preamble = (
         "HARD CONSTRAINTS:\n"
-        f"- Opening line MUST be: 'Good {tod}, it’s {pretty_date}.'\n"
-        "- Lead with the most important local news; do not lead with sports unless it’s clearly the top story.\n"
+        f"- Opening line MUST be: 'Good {tod}, it's {pretty_date}.'\n"
+        "- Lead with the most important local news; do not lead with sports unless it's clearly the top story.\n"
         "- Absolutely no editorializing, sympathy, or sentiment.\n"
         "- Attribute sources naturally in-line (The Boston Globe, Boston.com, B-Side).\n"
         "- 5–8 items; smooth transitions; quick weather + notable events; end with beta disclosure.\n"
@@ -205,7 +206,7 @@ def rewrite_with_openai(prompt_text: str, notes: list[str]) -> str | None:
 
 # -------------------- TTS SANITIZER --------------------
 def sanitize_for_tts(s: str) -> str:
-    # Normalize punctuation & expand acronyms to reduce prosody “drag”
+    # Normalize punctuation & expand acronyms to reduce prosody "drag"
     rep = (
         ("—", ", "), ("–", ", "), ("…", ". "),
         (" / ", " or "),
@@ -217,31 +218,62 @@ def sanitize_for_tts(s: str) -> str:
     # Collapse whitespace
     return " ".join(s.split())
 
-# -------------------- ELEVENLABS (SINGLE CLEAN REQUEST) --------------------
+# -------------------- IMPROVED TTS WITH CHUNKING --------------------
+def split_text_smartly(text: str, max_chars: int = 700) -> list[str]:
+    """Split text at natural breakpoints while respecting max length."""
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    current = ""
+    
+    # Split by sentences first
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    for sentence in sentences:
+        # If adding this sentence would exceed limit, save current chunk
+        if current and len(current + " " + sentence) > max_chars:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = current + " " + sentence if current else sentence
+    
+    # Add the final chunk
+    if current:
+        chunks.append(current.strip())
+    
+    return chunks
+
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    Single clean TTS request to ElevenLabs (non-streaming).
-    Uses top-level voice_speed and conservative 'news anchor' settings.
+    Improved TTS with smart chunking and optimal settings for news reading.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
         return None
 
-    # Non-streaming endpoint; explicit output format; no streaming params
+    # For short content, use single request
+    if len(text) <= 600:
+        return _single_tts_request(text)
+    
+    # For longer content, use chunking
+    return _chunked_tts_request(text)
+
+def _single_tts_request(text: str) -> bytes | None:
+    """Single TTS request with optimized settings."""
     base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
-    url  = f"{base}?output_format=mp3_44100_128"
+    url = f"{base}?output_format=mp3_44100_128"
 
     payload = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",  # steady, high-quality long-form
+        "model_id": "eleven_turbo_v2_5",  # Most stable for longer content
         "voice_settings": {
-            "stability": 0.80,        # consistent pacing
-            "similarity_boost": 0.90, # keep timbre close
-            "style": 0.15,            # low drama for news
+            "stability": 0.90,        # High consistency
+            "similarity_boost": 0.85, # Good voice match without artifacts
+            "style": 0.05,            # Minimal style for clean news reading
             "use_speaker_boost": True
-        },
-        # IMPORTANT: voice_speed at top-level (not inside voice_settings)
-        "voice_speed": 1.00
+        }
+        # Removed voice_speed - causes instability
     }
 
     headers = {
@@ -255,14 +287,80 @@ def tts_elevenlabs(text: str) -> bytes | None:
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
-        print(f"[diag] ElevenLabs success: {len(r.content)} bytes")
+        print(f"[diag] ElevenLabs single request success: {len(r.content)} bytes")
         return r.content
-    except requests.exceptions.Timeout:
-        print("[warn] ElevenLabs request timed out", file=sys.stderr)
-        return None
     except Exception as e:
-        print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
+        print(f"[warn] ElevenLabs single request failed: {e}", file=sys.stderr)
         return None
+
+def _chunked_tts_request(text: str) -> bytes | None:
+    """Chunked TTS request for longer content."""
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        print("[warn] pydub not available, falling back to single request")
+        return _single_tts_request(text)
+
+    chunks = split_text_smartly(text, max_chars=600)
+    print(f"[diag] Split text into {len(chunks)} chunks")
+    
+    audio_segments = []
+    
+    for i, chunk in enumerate(chunks):
+        print(f"[diag] Processing chunk {i+1}/{len(chunks)}")
+        
+        base = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+        url = f"{base}?output_format=mp3_44100_128"
+        
+        payload = {
+            "text": chunk,
+            "model_id": "eleven_turbo_v2_5",
+            "voice_settings": {
+                "stability": 0.90,
+                "similarity_boost": 0.85,
+                "style": 0.05,
+                "use_speaker_boost": True
+            }
+        }
+        
+        headers = {
+            "xi-api-key": ELEVEN_API_KEY,
+            "accept": "audio/mpeg",
+            "content-type": "application/json"
+        }
+        
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=120)
+            if r.status_code >= 400:
+                print(f"[warn] ElevenLabs error on chunk {i+1}: {r.status_code}: {r.text[:200]}")
+                return None
+            
+            # Convert to AudioSegment for concatenation
+            audio_chunk = AudioSegment.from_mp3(io.BytesIO(r.content))
+            audio_segments.append(audio_chunk)
+            
+        except Exception as e:
+            print(f"[warn] ElevenLabs error on chunk {i+1}: {e}")
+            return None
+    
+    if not audio_segments:
+        return None
+    
+    # Concatenate all chunks with small gaps for natural pacing
+    final_audio = audio_segments[0]
+    for segment in audio_segments[1:]:
+        # Add 250ms of silence between chunks
+        silence = AudioSegment.silent(duration=250)
+        final_audio = final_audio + silence + segment
+    
+    # Export to bytes
+    output = io.BytesIO()
+    final_audio.export(output, format="mp3", bitrate="128k")
+    output.seek(0)
+    
+    result = output.read()
+    print(f"[diag] ElevenLabs chunked success: {len(result)} bytes")
+    return result
 
 # -------------------- OUTPUT (SITE/FEED) --------------------
 def write_shownotes(date_str, items):

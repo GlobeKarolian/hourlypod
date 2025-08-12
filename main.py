@@ -218,10 +218,12 @@ def sanitize_for_tts(s: str) -> str:
     return " ".join(s.split())
 
 # -------------------- ULTRA BASIC TTS (NO SLOWDOWN) --------------------
+# Replace JUST the TTS function with this slightly more natural version
+
 def tts_elevenlabs(text: str) -> bytes | None:
     """
-    ULTRA BASIC TTS - Minimal settings to prevent slowdown/struggling.
-    Prioritizes speed and reliability over quality.
+    SLIGHTLY MORE NATURAL - Small step toward human-like speech.
+    Only minor changes from the working ultra-basic version.
     """
     if not ELEVEN_API_KEY or not ELEVEN_VOICE_ID or not text.strip():
         print("[diag] skipping TTS; missing ELEVEN_API_KEY/VOICE_ID or empty text")
@@ -234,12 +236,11 @@ def tts_elevenlabs(text: str) -> bytes | None:
         "text": text,
         "model_id": "eleven_multilingual_v2",
         "voice_settings": {
-            "stability": 0.5,         # MUCH LOWER - less processing strain
-            "similarity_boost": 0.75, # LOWER - easier processing
-            "style": 0.0,             # ZERO - absolutely no style processing
+            "stability": 0.6,         # SMALL BUMP: 0.5 → 0.6 (slightly more natural)
+            "similarity_boost": 0.75, # SAME: keep what works
+            "style": 0.05,            # TINY BUMP: 0.0 → 0.05 (minimal personality)
             "use_speaker_boost": True
         }
-        # NO voice_speed, NO extra parameters, NOTHING fancy
     }
 
     headers = {
@@ -249,15 +250,12 @@ def tts_elevenlabs(text: str) -> bytes | None:
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=120)  # Shorter timeout
+        r = requests.post(url, headers=headers, json=payload, timeout=120)
         if r.status_code >= 400:
             print(f"[warn] ElevenLabs error {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return None
-        print(f"[diag] ✅ Ultra basic TTS (no slowdown): {len(r.content):,} bytes")
+        print(f"[diag] ✅ Slightly natural TTS: {len(r.content):,} bytes")
         return r.content
-    except requests.exceptions.Timeout:
-        print("[warn] ElevenLabs request timed out", file=sys.stderr)
-        return None
     except Exception as e:
         print(f"[warn] ElevenLabs request failed: {e}", file=sys.stderr)
         return None

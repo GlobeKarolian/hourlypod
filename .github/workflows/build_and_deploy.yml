@@ -35,6 +35,11 @@ jobs:
           MAX_ITEMS: "8"
         run: python main.py
         
+      - name: Create JSON API endpoints
+        env:
+          PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+        run: python create_api.py
+        
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:
